@@ -35,6 +35,8 @@ const KEEP_PAIRS: &[(&str, &str)] = &[
     ("в", "четвертых"),
 ];
 
+use std::collections::HashSet;
+
 fn is_word_char(c: char) -> bool {
     c.is_alphabetic() || c == '\u{02BB}' || c == '\u{02BC}'
 }
@@ -64,7 +66,9 @@ fn is_acronym(word: &str) -> bool {
     word.chars().count() >= 2 && word.chars().all(char::is_uppercase)
 }
 
-fn keep_hyphen(left: &str, right: &str) -> bool {
+/// A real compound: fixed lists, acronym suffixes ("BMT-ning"), or a hyphenated form that
+/// the same document also uses unbroken ("pul-kredit" in `keep`).
+fn keep_hyphen(left: &str, right: &str, keep: &HashSet<String>) -> bool {
     let left_word = last_word(left);
     let l = left_word.to_lowercase();
     let r = first_word(right).to_lowercase();
@@ -73,20 +77,44 @@ fn keep_hyphen(left: &str, right: &str) -> bool {
         || in_list(KEEP_LEFT, &l)
         || in_list(KEEP_RIGHT, &r)
         || KEEP_PAIRS.contains(&(l.as_str(), r.as_str()))
+        || (!keep.is_empty() && keep.contains(&format!("{l}-{r}")))
 }
 
-/// Does `line` end with `letter-` and should that hyphen be removed given the next line?
-fn is_wrap(line: &str, next: &str) -> bool {
+/// "i.f.n.", "A.": a single letter followed by a dot right after the hyphen.
+fn starts_with_initial(right: &str) -> bool {
+    let word = first_word(right);
+    word.chars().count() == 1 && right[word.len()..].starts_with('.')
+}
+
+#[derive(PartialEq)]
+enum Wrap {
+    /// Not a wrapped word: leave the text as it is.
+    Leave,
+    /// A word broken by the line end: drop the hyphen.
+    Join,
+    /// A real compound broken at its hyphen: keep the hyphen, drop the break.
+    JoinKeepingHyphen,
+}
+
+/// How to treat `line` ending in `letter-` followed by `next`.
+fn line_wrap(line: &str, next: &str, keep: &HashSet<String>) -> Wrap {
     let mut rev = line.chars().rev();
     if rev.next() != Some('-') || !rev.next().is_some_and(char::is_alphabetic) {
-        return false;
+        return Wrap::Leave;
     }
-    next.chars().next().is_some_and(char::is_lowercase)
-        && !keep_hyphen(&line[..line.len() - 1], next)
+    if !next.chars().next().is_some_and(char::is_lowercase) || starts_with_initial(next) {
+        return Wrap::Leave;
+    }
+    if keep_hyphen(&line[..line.len() - 1], next, keep) {
+        Wrap::JoinKeepingHyphen
+    } else {
+        Wrap::Join
+    }
 }
 
-/// Remove a space-separated wrap ("boshqa- rish" -> "boshqarish") in one line.
-fn join_inline_wraps(line: &str) -> String {
+/// Repair a wrap that kept its space inside one line ("boshqa- rish" -> "boshqarish",
+/// "pul- kredit" -> "pul-kredit" when the document uses "pul-kredit").
+fn join_inline_wraps(line: &str, keep: &HashSet<String>) -> String {
     let chars: Vec<(usize, char)> = line.char_indices().collect();
     let mut out = String::with_capacity(line.len());
     let mut copied = 0;
@@ -94,19 +122,23 @@ fn join_inline_wraps(line: &str) -> String {
         if c != '-' || i < copied {
             continue;
         }
+        let letter_before = k > 0 && chars[k - 1].1.is_alphabetic();
         let space_then_lower = chars.get(k + 1).is_some_and(|&(_, s)| s == ' ')
             && chars.get(k + 2).is_some_and(|&(_, l)| l.is_lowercase());
-        if !space_then_lower {
+        if !letter_before || !space_then_lower {
+            continue;
+        }
+        let right_start = chars[k + 2].0;
+        if starts_with_initial(&line[right_start..]) {
             continue;
         }
         let left = last_word(&line[..i]);
-        let right_start = chars[k + 2].0;
-        let right = first_word(&line[right_start..]);
-        let initials =
-            right.chars().count() == 1 && line[right_start + right.len()..].starts_with('.');
         let plain_word =
             left.chars().count() >= 2 && left.chars().all(|c| is_word_char(c) && !c.is_uppercase());
-        if plain_word && !initials && !keep_hyphen(&line[..i], right) {
+        if keep_hyphen(&line[..i], &line[right_start..], keep) {
+            out.push_str(&line[copied..=i]);
+            copied = right_start;
+        } else if plain_word {
             out.push_str(&line[copied..i]);
             copied = right_start;
         }
@@ -117,14 +149,20 @@ fn join_inline_wraps(line: &str) -> String {
 
 /// Repair `-\n` line wraps and inline "word- word" wraps. Other text is returned unchanged.
 pub fn repair_hyphenation(text: &str) -> String {
-    join_line_wraps(text)
+    repair_with(text, &HashSet::new())
+}
+
+/// [`repair_hyphenation`] that also keeps hyphens of compounds listed in `keep`
+/// (lowercase "left-right" pairs collected from the same document).
+pub fn repair_with(text: &str, keep: &HashSet<String>) -> String {
+    join_line_wraps(text, keep)
         .split('\n')
-        .map(join_inline_wraps)
+        .map(|line| join_inline_wraps(line, keep))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn join_line_wraps(text: &str) -> String {
+fn join_line_wraps(text: &str, keep: &HashSet<String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut lines = text.split('\n').peekable();
     while let Some(first) = lines.next() {
@@ -133,10 +171,12 @@ fn join_line_wraps(text: &str) -> String {
         while let Some(&next) = lines.peek() {
             let trimmed = current.trim_end();
             let next_trimmed = next.trim_start();
-            if !is_wrap(trimmed, next_trimmed) {
-                break;
-            }
-            let mut merged = trimmed[..trimmed.len() - 1].to_string();
+            let cut = match line_wrap(trimmed, next_trimmed, keep) {
+                Wrap::Leave => break,
+                Wrap::Join => trimmed.len() - 1,
+                Wrap::JoinKeepingHyphen => trimmed.len(),
+            };
+            let mut merged = trimmed[..cut].to_string();
             merged.push_str(next_trimmed);
             current = merged;
             lines.next();
@@ -168,18 +208,18 @@ mod tests {
 
     #[test]
     fn keeps_legit_hyphens() {
-        assert_eq!(repair_hyphenation("кто-\nто пришёл"), "кто-\nто пришёл");
-        assert_eq!(repair_hyphenation("из-\nза стола"), "из-\nза стола");
-        assert_eq!(repair_hyphenation("северо-\nзападный"), "северо-\nзападный");
-        assert_eq!(repair_hyphenation("во-\nпервых"), "во-\nпервых");
+        assert_eq!(repair_hyphenation("кто-\nто пришёл"), "кто-то пришёл");
+        assert_eq!(repair_hyphenation("из-\nза стола"), "из-за стола");
+        assert_eq!(repair_hyphenation("северо-\nзападный"), "северо-западный");
+        assert_eq!(repair_hyphenation("во-\nпервых"), "во-первых");
         assert_eq!(repair_hyphenation("Москва-\nГород"), "Москва-\nГород");
     }
 
     #[test]
     fn keeps_po_adverbs_and_acronym_suffixes() {
-        assert_eq!(repair_hyphenation("по-\nрусски"), "по-\nрусски");
-        assert_eq!(repair_hyphenation("по-\nмоему"), "по-\nмоему");
-        assert_eq!(repair_hyphenation("BMT-\nning qarori"), "BMT-\nning qarori");
+        assert_eq!(repair_hyphenation("по-\nрусски"), "по-русски");
+        assert_eq!(repair_hyphenation("по-\nмоему"), "по-моему");
+        assert_eq!(repair_hyphenation("BMT-\nning qarori"), "BMT-ning qarori");
     }
 
     #[test]
@@ -226,8 +266,46 @@ mod tests {
             "Otamurodov- i.f.n., dotsent",
             "Toshkent - 2021 yil",
             "pul – tovar",
-            "кто- то",
-            "BMT- ning",
+        ] {
+            assert_eq!(repair_hyphenation(text), text, "{text}");
+        }
+    }
+
+    #[test]
+    fn kept_compounds_lose_only_the_break() {
+        assert_eq!(repair_hyphenation("кто- то"), "кто-то");
+        assert_eq!(repair_hyphenation("BMT- ning"), "BMT-ning");
+    }
+
+    #[test]
+    fn document_compounds_keep_their_hyphen() {
+        let keep: HashSet<String> = ["pul-kredit", "oltin-valyuta", "qoʻllab-quvvatlash"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            repair_with("pul-\nkredit siyosati", &keep),
+            "pul-kredit siyosati"
+        );
+        assert_eq!(
+            repair_with("Pul- kredit va oltin- valyuta", &keep),
+            "Pul-kredit va oltin-valyuta"
+        );
+        assert_eq!(
+            repair_with("qoʻllab-\nquvvatlash", &keep),
+            "qoʻllab-quvvatlash"
+        );
+        assert_eq!(repair_with("boshqa-\nrish", &keep), "boshqarish");
+        assert_eq!(repair_hyphenation("pul-\nkredit"), "pulkredit");
+    }
+
+    #[test]
+    fn initials_numbers_and_dashes_are_left_alone() {
+        for text in [
+            "Otamurodov-\ni.f.n., dotsent",
+            "1978-\nyillarda",
+            "pul –\nkredit",
+            "A.Karimov —\nmuallif",
         ] {
             assert_eq!(repair_hyphenation(text), text, "{text}");
         }

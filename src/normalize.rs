@@ -6,10 +6,16 @@
 //! * Uzbek apostrophes are only rewritten when they sit *between two Latin letters*,
 //!   so quotes, Cyrillic text and standalone punctuation are left alone.
 //! * Table-of-contents dot leaders ("........") collapse to a single ellipsis.
+//!
+//! Order: symbol-font characters, then mixed-script words, then apostrophes, then spaces.
+//! Each step needs the previous one: "TА’LIM" only gets its apostrophe once the Cyrillic
+//! "А" is Latin.
 
 use unicode_normalization::{is_nfc, UnicodeNormalization};
 
 use crate::chars::is_apostrophe;
+use crate::confusables::fix_mixed_words;
+use crate::symbols::{self, SymbolFont};
 
 /// Canonical Uzbek Latin modifier letters (Unicode recommendation).
 const TURNED_COMMA: char = '\u{02BB}'; // ʻ  in oʻ, gʻ
@@ -17,8 +23,22 @@ const APOSTROPHE: char = '\u{02BC}'; // ʼ  tutuq belgisi, e.g. maʼlumot
 const ELLIPSIS: char = '\u{2026}';
 const MIN_LEADER_DOTS: usize = 4;
 
+const BULLET: char = '•';
+
+/// What normalization changed, for document metadata.
+#[derive(Default, Debug, PartialEq)]
+pub struct Stats {
+    pub mixed_words: usize,
+    pub symbols_mapped: usize,
+    pub symbols_removed: usize,
+}
+
 fn is_apostrophe_like(c: char) -> bool {
-    is_apostrophe(c) || matches!(c, '´' | 'ʹ')
+    is_apostrophe(c)
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphabetic() || is_apostrophe(c)
 }
 
 /// Characters that carry no visible content in extracted text.
@@ -35,15 +55,34 @@ fn is_invisible(c: char) -> bool {
     )
 }
 
-/// Private-use characters that symbol fonts (Symbol, Wingdings) use for bullets and signs.
-/// Returns the plain replacement and whether a space must follow it (bullets).
-fn map_symbol(c: char) -> Option<(char, bool)> {
-    match c {
-        '\u{F0B7}' | '\u{F02F}' | '\u{F0FC}' => Some(('•', true)),
-        '\u{F02D}' => Some(('-', true)),
-        '\u{F03D}' => Some(('=', false)),
-        _ => None,
+/// Replace private-use characters (symbol fonts without a known font: Symbol table, a
+/// line-initial glyph is a bullet) and drop the ones without meaning.
+fn map_private_use(chars: Vec<char>, stats: &mut Stats) -> Vec<char> {
+    if !chars.iter().any(|&c| symbols::is_private_use(c)) {
+        return chars;
     }
+    let mut out = Vec::with_capacity(chars.len());
+    let mut line_start = true;
+    for c in chars {
+        if symbols::is_private_use(c) {
+            match symbols::map(c, SymbolFont::Unknown, line_start) {
+                Some(plain) => {
+                    out.extend(plain.chars());
+                    stats.symbols_mapped += 1;
+                }
+                None => stats.symbols_removed += 1,
+            }
+            line_start = false;
+            continue;
+        }
+        out.push(c);
+        if c == '\n' {
+            line_start = true;
+        } else if !c.is_whitespace() {
+            line_start = false;
+        }
+    }
+    out
 }
 
 fn map_space(c: char) -> char {
@@ -143,7 +182,13 @@ impl Writer {
 /// Normalize text: NFC, drop invisible chars, unify spaces, fix Uzbek apostrophes,
 /// collapse dot leaders, runs of spaces and blank lines. Line structure (`\n`) is preserved.
 pub fn normalize_text(text: &str) -> String {
-    let chars: Vec<char> = if is_nfc(text) {
+    normalize_with_stats(text).0
+}
+
+/// [`normalize_text`] plus counts of what it fixed.
+pub fn normalize_with_stats(text: &str) -> (String, Stats) {
+    let mut stats = Stats::default();
+    let base: Vec<char> = if is_nfc(text) {
         text.chars()
             .filter(|&c| !is_invisible(c))
             .map(map_space)
@@ -155,16 +200,18 @@ pub fn normalize_text(text: &str) -> String {
             .collect()
     };
 
+    let mut chars = map_private_use(base, &mut stats);
+    stats.mixed_words = fix_mixed_words(&mut chars, is_word_char);
+
     let mut writer = Writer::new(text.len());
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
             ' ' => writer.space(),
             '\n' => writer.newline(),
-            c if map_symbol(c).is_some() => {
-                let (plain, space_after) = map_symbol(c).unwrap_or((c, false));
-                writer.push(plain);
-                if space_after {
+            BULLET => {
+                writer.push(BULLET);
+                if chars.get(i + 1).is_some_and(|c| !c.is_whitespace()) {
                     writer.space();
                 }
             }
@@ -189,7 +236,7 @@ pub fn normalize_text(text: &str) -> String {
         }
         i += 1;
     }
-    writer.out
+    (writer.out, stats)
 }
 
 #[cfg(test)]
@@ -247,8 +294,46 @@ mod tests {
             normalize_text("\u{F0B7} birinchi\n\u{F0FC}ikkinchi"),
             "• birinchi\n• ikkinchi"
         );
-        assert_eq!(normalize_text("a \u{F03D} b"), "a = b");
-        assert_eq!(normalize_text("\u{F02D} band"), "- band");
+        assert_eq!(normalize_text("a \u{F03D} b \u{F03E} c"), "a = b > c");
+        assert_eq!(normalize_text("\u{F02D} band"), "• band");
+    }
+
+    #[test]
+    fn no_private_use_character_survives() {
+        let (text, stats) = normalize_with_stats("x \u{F0E6}y \u{E000}z \u{F8FF}");
+        assert_eq!(text, "x y z");
+        assert!(!text.chars().any(symbols::is_private_use));
+        assert_eq!((stats.symbols_mapped, stats.symbols_removed), (0, 3));
+    }
+
+    #[test]
+    fn mixed_script_words_are_fixed_before_apostrophes() {
+        let (text, stats) = normalize_with_stats("TА’LIM vа vаlyutа");
+        assert_eq!(text, "TAʼLIM va valyuta");
+        assert_eq!(stats.mixed_words, 3);
+        assert_eq!(normalize_text("II-BОB"), "II-BOB");
+    }
+
+    #[test]
+    fn single_script_text_is_unchanged() {
+        for text in [
+            "Банковская система обеспечивает расчёты.",
+            "Ўзбекистон Республикаси ўқувчилар учун.",
+            "Oʻzbekiston Respublikasi valyuta bozori.",
+        ] {
+            assert_eq!(
+                normalize_with_stats(text),
+                (text.to_string(), Stats::default())
+            );
+        }
+    }
+
+    #[test]
+    fn all_nine_apostrophe_variants_are_unified() {
+        for apostrophe in ['\'', '‘', '’', '`', '´', '′', '＇', 'ʻ', 'ʼ'] {
+            let text = format!("o{apostrophe}zbek ma{apostrophe}lumot");
+            assert_eq!(normalize_text(&text), "oʻzbek maʼlumot", "{apostrophe:?}");
+        }
     }
 
     #[test]

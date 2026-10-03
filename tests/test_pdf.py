@@ -4,6 +4,7 @@ import pymupdf
 import pytest
 from helpers import bold_font, cyrillic_font, make_pdf
 from uzru_parser import BlockType, Parser, chunk, parse, pdf
+from uzru_parser.text import CleanStats
 
 
 @pytest.fixture
@@ -185,11 +186,17 @@ def test_footnote_mark_and_entry_are_separated_from_the_text(tmp_path: Path) -> 
     font = pymupdf.Font(fontfile=cyrillic_font())
     doc = pymupdf.open()
     first = new_page(doc)
-    first.insert_text((72, 100), "Bu masala bilan mualliflar", fontname="regular", fontsize=11)
-    width = font.text_length("Bu masala bilan mualliflar", fontsize=11)
-    first.insert_text((72 + width, 95), "5", fontname="regular", fontsize=7)
+    lines = [
+        "Bu masala boʻyicha koʻplab ilmiy ishlar",
+        "yozilgan va ular orasida mashhur",
+        "mualliflar",
+    ]
+    for i, text in enumerate(lines):
+        first.insert_text((72, 100 + 14 * i), text, fontname="regular", fontsize=11)
+    width = font.text_length("mualliflar", fontsize=11)
+    first.insert_text((72 + width, 123), "5", fontname="regular", fontsize=7)
     first.insert_text(
-        (72, 120), "Markaziy bank emission bank yaratgan", fontname="regular", fontsize=11
+        (72, 180), "Markaziy bank emission bank yaratgan", fontname="regular", fontsize=11
     )
     first.insert_text(
         (72, 790), "5 Sevruk V.T. Bank riskleri. M.: Delo, 1995", fontname="regular", fontsize=8
@@ -206,9 +213,9 @@ def test_footnote_mark_and_entry_are_separated_from_the_text(tmp_path: Path) -> 
     kinds = [b.type for b in document.blocks]
     assert kinds.count(BlockType.FOOTNOTE) == 1
     note = next(b for b in document.blocks if b.type is BlockType.FOOTNOTE)
-    assert note.extra["number"] == "5"
+    assert (note.extra["number"], note.text) == ("5", "Sevruk V.T. Bank riskleri. M.: Delo, 1995")
     texts = [b.text for b in document.blocks if b.type is BlockType.PARAGRAPH]
-    assert "Bu masala bilan mualliflar" in texts
+    assert " ".join(lines) in texts
     assert not any("mualliflar5" in t for t in texts)
     joined = next(t for t in texts if t.startswith("Markaziy"))
     assert joined == "Markaziy bank emission bank yaratgan vazifasini bajaradi. Keyingi gap."
@@ -238,7 +245,10 @@ def test_title_and_body_in_one_pdf_block_become_heading_and_paragraph(tmp_path: 
     blocks = parse(path).blocks
     assert [b.type for b in blocks] == [BlockType.HEADING, BlockType.PARAGRAPH]
     assert blocks[0].text == "1.1. Banklarning paydo boʻlish sabablari"
-    assert (blocks[0].level, blocks[1].text.startswith("Pul")) == (2, True)
+    assert (
+        blocks[1].text
+        == "Pul – mahsulot va tovarlarni ishlab chiqarish uchun zarur vosita sifatida paydo boʻldi."
+    )
 
 
 def test_prose_in_a_ruled_grid_is_not_a_table(tmp_path: Path) -> None:
@@ -269,24 +279,22 @@ def span(
     return {"text": text, "size": size, "font": font, "flags": flags, "origin": (0.0, y)}
 
 
-def test_symbol_font_glyph_does_not_set_the_block_font_size() -> None:
+def test_symbol_font_glyph_does_not_set_the_line_font_size() -> None:
     raw_line = {
         "bbox": (0, 90, 200, 105),
-        "spans": [span("", 14, "Symbol"), span("dollar (11%) va dollar")],
+        "spans": [span("\uf02f", 14, "Symbol"), span("dollar (11%) va dollar")],
     }
-    blocks = pdf._text_blocks({"lines": [raw_line]}, 5)
-    assert [b.font_size for b in blocks] == [11.0]
-    assert blocks[0].text.startswith("")
+    line = pdf._line(raw_line, 0, CleanStats())
+    assert line.size == 11.0
+    assert line.text == "• dollar (11%) va dollar"
 
 
 def test_superscript_flag_and_raised_small_digits_are_reference_marks() -> None:
     flagged = {"bbox": (0, 90, 200, 105), "spans": [span("tizimi"), span("19", flags=1)]}
     raised = {"bbox": (0, 90, 200, 105), "spans": [span("atalgan"), span("8", size=7, y=95.0)]}
     plain_digits = {"bbox": (0, 90, 200, 105), "spans": [span("Model "), span("2")]}
-    results = [
-        pdf._text_blocks({"lines": [line]}, 1)[0] for line in (flagged, raised, plain_digits)
-    ]
-    assert [(r.text, r.footnote_refs) for r in results] == [
+    results = [pdf._line(line, 0, CleanStats()) for line in (flagged, raised, plain_digits)]
+    assert [(r.text, r.refs) for r in results] == [
         ("tizimi", ["19"]),
         ("atalgan", ["8"]),
         ("Model 2", []),
@@ -298,4 +306,57 @@ def test_subscript_digits_are_kept() -> None:
         "bbox": (0, 90, 200, 105),
         "spans": [span("H"), span("2", size=7, y=104.0), span("O")],
     }
-    assert pdf._text_blocks({"lines": [lowered]}, 1)[0].text == "H2O"
+    assert pdf._line(lowered, 0, CleanStats()).text == "H2O"
+
+
+def test_bookmarks_set_heading_levels(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    for title, text in [
+        ("Kirish", "Kirish qismi matni shu yerda."),
+        ("Banklarning turlari", "Banklar haqida matn."),
+    ]:
+        page = new_page(doc)
+        page.insert_text((72, 100), title, fontname="regular", fontsize=11)
+        page.insert_text((72, 140), text, fontname="regular", fontsize=11)
+    doc.set_toc([[1, "KIRISH", 1], [2, "Banklarning turlari", 2]])
+    path = tmp_path / "outline.pdf"
+    doc.save(path)
+    doc.close()
+
+    document = parse(path)
+    headings = [(b.text, b.level) for b in document.blocks if b.type is BlockType.HEADING]
+    assert headings == [("Kirish", 1), ("Banklarning turlari", 2)]
+    assert document.metadata.extra["heading_sources"] == {"bookmarks": 2}
+
+
+def test_chart_labels_become_one_figure_block(tmp_path: Path) -> None:
+    doc = pymupdf.open()
+    page = new_page(doc)
+    page.insert_text(
+        (72, 100), "Quyidagi grafikda risklar koʻrsatilgan.", fontname="regular", fontsize=11
+    )
+    for i in range(5):
+        page.draw_rect(
+            pymupdf.Rect(100 + i * 40, 300 - i * 20, 125 + i * 40, 400),
+            color=(0, 0, 0),
+            fill=(0.5, 0.5, 0.5),
+        )
+    for i, label in enumerate(["Risklar", "Kredit", "Foiz"]):
+        page.insert_text((100 + i * 80, 415), label, fontname="regular", fontsize=8)
+    path = tmp_path / "chart.pdf"
+    doc.save(path)
+    doc.close()
+
+    document = parse(path)
+    figures = [b for b in document.blocks if b.extra.get("role") == "figure"]
+    assert [f.text for f in figures] == ["Risklar | Kredit | Foiz"]
+    assert BlockType.HEADING not in [b.type for b in document.blocks]
+    assert len(chunk(document)) == 1
+
+
+def test_mixed_alphabet_words_are_fixed_and_counted(tmp_path: Path) -> None:
+    path = make_pdf(tmp_path / "mixed.pdf", ["Vаlyutа bozori vа TА’LIM tizimi haqida."])
+    document = parse(path)
+    assert document.blocks[0].text == "Valyuta bozori va TAʼLIM tizimi haqida."
+    assert document.metadata.extra["mixed_script_words_fixed"] == 3
+    assert document.blocks[0].raw_text.startswith("Vаlyutа")  # the original stays recoverable

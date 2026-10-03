@@ -69,12 +69,26 @@ def test_uzbek_text_normalized(tmp_path: Path) -> None:
 
 def test_unstyled_headings_use_heuristics(tmp_path: Path) -> None:
     document = docx.Document()
-    paragraph = document.add_paragraph()
-    paragraph.add_run("1. ОБЩИЕ ПОЛОЖЕНИЯ").bold = True
-    document.add_paragraph("Текст раздела договора.")
+    for title in ("1. ОБЩИЕ ПОЛОЖЕНИЯ", "2. ПРЕДМЕТ ДОГОВОРА"):
+        document.add_paragraph().add_run(title).bold = True
+        document.add_paragraph("Текст раздела договора.")
     path = tmp_path / "plain.docx"
     document.save(path)
-    assert [b.type for b in parse(path).blocks] == [BlockType.HEADING, BlockType.PARAGRAPH]
+    assert [b.type for b in parse(path).blocks] == [
+        BlockType.HEADING,
+        BlockType.PARAGRAPH,
+        BlockType.HEADING,
+        BlockType.PARAGRAPH,
+    ]
+
+
+def test_lone_bold_numbered_line_in_docx_is_a_list_item(tmp_path: Path) -> None:
+    document = docx.Document()
+    document.add_paragraph("Talablar quyidagilardan iborat.")
+    document.add_paragraph().add_run("4. Hujjatlarni oʻz vaqtida topshirish").bold = True
+    path = tmp_path / "item.docx"
+    document.save(path)
+    assert [b.type for b in parse(path).blocks] == [BlockType.PARAGRAPH, BlockType.LIST]
 
 
 def test_explicit_page_breaks_advance_pages(tmp_path: Path) -> None:
@@ -89,3 +103,13 @@ def test_explicit_page_breaks_advance_pages(tmp_path: Path) -> None:
     assert [b.page for b in result.blocks] == [1, 2]
     assert result.metadata.page_count == 2
     assert result.metadata.extra["pages_approximate"]
+
+
+def test_docx_mixed_alphabet_words_are_fixed(tmp_path: Path) -> None:
+    document = docx.Document()
+    document.add_paragraph("Vаlyutа bozori va mа’lumot tizimi.")
+    path = tmp_path / "mixed.docx"
+    document.save(path)
+    result = parse(path)
+    assert result.blocks[0].text == "Valyuta bozori va maʼlumot tizimi."
+    assert result.metadata.extra["mixed_script_words_fixed"] == 2

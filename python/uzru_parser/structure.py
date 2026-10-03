@@ -1,35 +1,37 @@
-"""Turn raw extracted text blocks into typed document blocks."""
+"""Turn raw extracted blocks into typed document blocks.
+
+Heading decisions use sources in this order of trust: PDF bookmarks, the document's own
+contents page, numbering ("3-MAVZU", "5.3."), then font style. Levels come from the kind of
+heading (chapter word, "N.N", "N.N.N", font size) so a child is never ranked above its parent.
+"""
 
 from __future__ import annotations
 
+import bisect
 import re
-from collections import Counter
+import statistics
+from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
-from .models import Block, BlockType
-from .text import detect_language, normalize, numbering_info, repair_hyphenation
+from . import config
+from .models import Block, BlockType, LanguageInfo
+from .text import CleanStats, Hyphenator, clean, detect_language, numbering_info
 
-MAX_HEADING_CHARS = 160
-MAX_KEYWORD_HEADING_CHARS = 300
-MAX_HEADING_LINES = 3
-SHORT_UPPERCASE_CHARS = 80
-LARGER_FONT_RATIO = 1.15
-HEADING_SCORE = 2
-BOLD_SHARE = 0.6
-MIN_UPPERCASE_LETTERS = 4
-MIN_LETTER_SHARE = 0.5
-MAX_LEVEL = 6
 CELL_SEPARATOR = " | "
-MAX_CONTINUATION_CHARS = 100
-SIZE_TOLERANCE = 0.5
-LINE_GAP_RATIO = 1.5
-MAX_TITLE_LINES = 3
 SENTENCE_END = ".?!:…;"
-TITLE_LINE_RATIO = 0.75
-
-PLAN_LINE = re.compile(r"^\s*(?:reja|режа|план)\s*:", re.IGNORECASE)
-FOOTNOTE_NUMBER = re.compile(r"^\s*(\d{1,3})\b")
 LIST_KINDS = ("bullet", "ordered")
+SECTION_KINDS = ("decimal", "keyword")
+
+PLAN_LINE = re.compile(rf"^\s*(?:{'|'.join(config.PLAN_WORDS)})\s*:", re.IGNORECASE)
+FOOTNOTE_NUMBER = re.compile(r"^\s*(\d{1,3})(?:\s+|(?=[^\W\d_]))")
+LEADING_NUMBER = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,3})*)")
+LEADING_ROMAN = re.compile(r"^\s*([IVXLC]{1,6})\b")
+TOC_ENTRY = re.compile(r"^(?P<title>.*?)(?:\s*(?:…|\.{3,}))?\s*(?P<page>\d{1,4})?\s*$")
+REAL_WORD = re.compile(r"[^\W\d_]{3,}")
+ROMAN = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100}
+
+Repair = Callable[[str], str]
 
 
 @dataclass
@@ -38,9 +40,10 @@ class RawBlock:
 
     ``heading_level``, ``list_item`` and ``rows`` let a reader state what it already knows
     (for example from DOCX styles or detected PDF tables); the rest is inferred.
-    ``role`` marks material that is not body text (``toc``, ``title_page``, ``back_matter``),
-    ``footnote`` a footnote entry, and ``footnote_refs`` the reference marks that were
-    removed from the text.
+    ``role`` marks material that is not body text (``toc``, ``title_page``, ``back_matter``,
+    ``figure``), ``footnote`` a footnote entry, and ``footnote_refs`` the reference marks that
+    were removed from the text. ``original`` is the text as extracted, ``spaced`` says the
+    block has clearly more space above it than a normal line.
     """
 
     text: str
@@ -54,52 +57,86 @@ class RawBlock:
     role: str | None = None
     footnote: bool = False
     footnote_refs: list[str] = field(default_factory=list)
+    original: str = ""
+    spaced: bool = False
+    heading_source: str | None = None
 
 
-def build_blocks(raw_blocks: list[RawBlock]) -> list[Block]:
-    """Classify raw blocks into headings, lists, tables and paragraphs, in document order."""
-    raws = [part for raw in raw_blocks for part in _split_raw(raw)]
-    body_size = body_font_size(raws)
-    prepared = [(raw, _clean(raw)) for raw in raws]
-    heading = [
-        raw.heading_level is not None
-        or (_is_candidate(raw, text) and _is_heading(text, raw, body_size))
-        for raw, text in prepared
-    ]
-    heading_sizes = sorted(
-        {
-            _size_key(raw.font_size)
-            for (raw, _), is_heading in zip(prepared, heading, strict=True)
-            if is_heading and raw.font_size and raw.heading_level is None
-        },
-        reverse=True,
-    )
+@dataclass
+class OutlineEntry:
+    """One PDF bookmark: level, cleaned title and 1-based page."""
+
+    level: int
+    title: str
+    page: int
+
+
+@dataclass
+class _Title:
+    key: str
+    source: str  # "bookmarks" or "contents"
+    level: int | None
+    page: int | None
+
+
+@dataclass
+class _Heading:
+    source: str  # bookmarks | contents | numbering | font | style
+    kind: tuple[object, ...]  # level class: ("kw", rank), ("dec", depth), ("font", size, bold)
+    size: float
+    level: int | None = None  # fixed level (bookmarks, DOCX styles)
+
+
+def build_blocks(
+    raw_blocks: list[RawBlock],
+    outline: list[OutlineEntry] | None = None,
+    compounds: Iterable[str] = (),
+    stats: CleanStats | None = None,
+    text_is_clean: bool = False,
+) -> list[Block]:
+    """Classify raw blocks into headings, lists, tables, footnotes and paragraphs.
+
+    ``text_is_clean`` says the reader already cleaned and hyphen-repaired block text (PDF);
+    table cells are always cleaned here.
+    """
+    repair = Hyphenator(sorted(compounds)).repair
+    titles = _TitleIndex(outline or [], raw_blocks)
+    raws = [part for raw in raw_blocks for part in _split_raw(raw, titles)]
+    body_size = body_font_size(raws) or 0.0
+    prepared = [(raw, _clean(raw, repair, stats, text_is_clean)) for raw in raws]
+    headings = _decide_headings(prepared, body_size, titles)
+    _assign_levels(headings, prepared)
 
     blocks: list[Block] = []
     previous: RawBlock | None = None
-    for (raw, text), is_heading in zip(prepared, heading, strict=True):
+    for (raw, text), heading in zip(prepared, headings, strict=True):
         if not text:
             continue
         if raw.rows is not None:
-            blocks.append(_table_block(raw, raw.rows))
+            blocks.append(_table_block(raw, raw.rows, repair, stats))
         elif raw.footnote:
             blocks.append(_footnote_block(raw, text))
-        elif is_heading:
+        elif heading is not None:
             if previous is not None and _continues_heading(blocks[-1], previous, raw, text):
                 blocks[-1].text = f"{blocks[-1].text} {_flatten(text)}"
                 blocks[-1].language = detect_language(blocks[-1].text)
             else:
-                level = raw.heading_level or _heading_level(text, raw, heading_sizes)
-                blocks.append(_block(BlockType.HEADING, _flatten(text), raw, min(level, MAX_LEVEL)))
+                level = min(heading.level or 1, config.MAX_LEVEL)
+                block = _block(BlockType.HEADING, _flatten(text), raw, level)
+                block.extra["heading_source"] = heading.source
+                blocks.append(block)
         elif items := _list_items(text, raw.list_item):
             _append_list(blocks, items, raw)
         else:
             blocks.append(_block(BlockType.PARAGRAPH, _flatten(text), raw))
         previous = raw
-    return _join_split_paragraphs(blocks)
+    blocks = _join_split_paragraphs(blocks, repair)
+    _inherit_short_languages(blocks)
+    return blocks
 
 
 def body_font_size(raw_blocks: list[RawBlock]) -> float | None:
+    """The most common font size, weighted by text length: the body text size."""
     weights: Counter[float] = Counter()
     for raw in raw_blocks:
         if raw.font_size and raw.rows is None and not raw.footnote:
@@ -107,34 +144,10 @@ def body_font_size(raw_blocks: list[RawBlock]) -> float | None:
     return weights.most_common(1)[0][0] if weights else None
 
 
-def _is_candidate(raw: RawBlock, text: str) -> bool:
-    """Only plain body-flow text can be a heading."""
-    plain = not (raw.list_item or raw.footnote or raw.role or raw.rows is not None)
-    return plain and bool(text)
-
-
-def _clean(raw: RawBlock) -> str:
+def _clean(raw: RawBlock, repair: Repair, stats: CleanStats | None, done: bool = False) -> str:
     if raw.rows is not None:
-        return _rows_text(_clean_rows(raw.rows))
-    return normalize(repair_hyphenation(raw.text))
-
-
-def _clean_rows(rows: list[list[str]]) -> list[list[str]]:
-    """Normalize cells, then drop empty rows and columns that are empty in every row."""
-    cleaned = [
-        [_flatten(normalize(repair_hyphenation(cell or ""))) for cell in row] for row in rows
-    ]
-    cleaned = [row for row in cleaned if any(row)]
-    used = [
-        index
-        for index in range(max((len(row) for row in cleaned), default=0))
-        if any(index < len(row) and row[index] for row in cleaned)
-    ]
-    return [[row[index] if index < len(row) else "" for index in used] for row in cleaned]
-
-
-def _rows_text(rows: list[list[str]]) -> str:
-    return "\n".join(CELL_SEPARATOR.join(cell for cell in row if cell) for row in rows)
+        return _rows_text(_clean_rows(raw.rows, repair, stats))
+    return raw.text if done else clean(repair(raw.text), stats)
 
 
 def _flatten(text: str) -> str:
@@ -145,11 +158,90 @@ def _size_key(size: float) -> float:
     return round(size * 2) / 2
 
 
+def _key(text: str) -> str:
+    """Comparison key for titles: lowercase letters and digits only."""
+    return "".join(c for c in text.lower() if c.isalnum())
+
+
+# --- Tables -------------------------------------------------------------------------------
+
+
+def _clean_rows(
+    rows: list[list[str]], repair: Repair, stats: CleanStats | None = None
+) -> list[list[str]]:
+    """Normalize cells, merge a header split over rows, drop empty rows and columns."""
+    cleaned = [[_flatten(clean(repair(cell or ""), stats)) for cell in row] for row in rows]
+    cleaned = _blank_repeated_header_cells(_merge_header_rows(cleaned))
+    cleaned = [row for row in cleaned if any(row)]
+    used = [
+        index
+        for index in range(max((len(row) for row in cleaned), default=0))
+        if any(index < len(row) and row[index] for row in cleaned)
+    ]
+    return [[row[index] if index < len(row) else "" for index in used] for row in cleaned]
+
+
+def _starts_lowercase(text: str) -> bool:
+    letter = next((c for c in text if c.isalpha()), "")
+    return letter.islower()
+
+
+def _merge_header_rows(rows: list[list[str]]) -> list[list[str]]:
+    """Join header rows that are one header written over several lines ("Ish" / "bosqichlari").
+
+    The continuation row has fewer filled cells than the row above, all starting lowercase;
+    an ordinary data row fills its cells.
+    """
+    rows = [list(row) for row in rows]
+    index = 0
+    while index + 1 < min(len(rows), config.HEADER_ROWS):
+        upper, lower = rows[index], rows[index + 1]
+        filled = [c for c, cell in enumerate(lower) if cell]
+        fewer = len(filled) < sum(1 for cell in upper if cell)
+        continues = (
+            bool(filled)
+            and fewer
+            and all(_starts_lowercase(lower[c]) and c < len(upper) and upper[c] for c in filled)
+        )
+        if not continues:
+            index += 1
+            continue
+        for c in filled:
+            upper[c] = f"{upper[c]} {lower[c]}"
+        del rows[index + 1]
+    return rows
+
+
+def _blank_repeated_header_cells(rows: list[list[str]]) -> list[list[str]]:
+    """A merged header cell is extracted once per spanned column; keep the first copy."""
+    for row in rows[: config.HEADER_ROWS]:
+        for c in range(len(row) - 1, 0, -1):
+            if row[c] and row[c] == row[c - 1] and any(ch.isalpha() for ch in row[c]):
+                row[c] = ""
+    return rows
+
+
+def _rows_text(rows: list[list[str]]) -> str:
+    return "\n".join(CELL_SEPARATOR.join(cell for cell in row if cell) for row in rows)
+
+
+def _table_block(
+    raw: RawBlock, rows: list[list[str]], repair: Repair, stats: CleanStats | None
+) -> Block:
+    rows = _clean_rows(rows, repair, stats)
+    block = _block(BlockType.TABLE, _rows_text(rows), raw)
+    block.extra["rows"] = rows
+    return block
+
+
+# --- Blocks -------------------------------------------------------------------------------
+
+
 def _block(block_type: BlockType, text: str, raw: RawBlock, level: int | None = None) -> Block:
     block = Block(
         type=block_type,
         text=text,
-        raw_text=raw.text,
+        raw_text=raw.original or raw.text,
         page=raw.page,
         bbox=raw.bbox,
         level=level,
@@ -162,90 +254,14 @@ def _block(block_type: BlockType, text: str, raw: RawBlock, level: int | None = 
     return block
 
 
-def _table_block(raw: RawBlock, rows: list[list[str]]) -> Block:
-    rows = _clean_rows(rows)
-    block = _block(BlockType.TABLE, _rows_text(rows), raw)
-    block.extra["rows"] = rows
-    return block
-
-
 def _footnote_block(raw: RawBlock, text: str) -> Block:
-    block = _block(BlockType.FOOTNOTE, _flatten(text), raw)
-    if match := FOOTNOTE_NUMBER.match(text):
+    """Footnote number in ``extra["number"]``, its text without the number."""
+    flat = _flatten(text)
+    match = FOOTNOTE_NUMBER.match(flat)
+    block = _block(BlockType.FOOTNOTE, flat[match.end() :] if match else flat, raw)
+    if match:
         block.extra["number"] = match.group(1)
     return block
-
-
-def _uppercase_ratio(text: str) -> float:
-    letters = [c for c in text if c.isalpha()]
-    visible = sum(1 for c in text if not c.isspace())
-    if len(letters) < MIN_UPPERCASE_LETTERS or len(letters) < MIN_LETTER_SHARE * visible:
-        return 0.0
-    return sum(c.isupper() for c in letters) / len(letters)
-
-
-def _is_heading(text: str, raw: RawBlock, body_size: float | None) -> bool:
-    flat = _flatten(text)
-    numbering = numbering_info(flat)
-    keyword = numbering is not None and numbering[0] == "keyword"
-    limit = MAX_KEYWORD_HEADING_CHARS if keyword else MAX_HEADING_CHARS
-    if len(flat) > limit or text.count("\n") + 1 > MAX_HEADING_LINES:
-        return False
-    if numbering and numbering[0] in LIST_KINDS:
-        return False
-    if not numbering and flat[0].islower():  # a sentence fragment, not a title
-        return False
-    uppercase = _uppercase_ratio(flat) >= 0.9
-    wrapped_keyword = keyword and flat[-1] == ","
-    if (flat[-1] in ",;" and not wrapped_keyword) or (
-        flat[-1] == "." and not uppercase and not numbering
-    ):
-        return False
-
-    score = 0
-    if body_size and raw.font_size and raw.font_size >= body_size * LARGER_FONT_RATIO:
-        score += 2
-    if raw.bold >= BOLD_SHARE:
-        score += 1
-    if uppercase:
-        score += 2 if len(flat) <= SHORT_UPPERCASE_CHARS else 1
-    if numbering:
-        score += 2 if keyword else 1
-    return score >= HEADING_SCORE
-
-
-def _heading_level(text: str, raw: RawBlock, heading_sizes: list[float]) -> int:
-    numbering = numbering_info(text)
-    if numbering:
-        return numbering[1]
-    if raw.font_size and _size_key(raw.font_size) in heading_sizes:
-        return heading_sizes.index(_size_key(raw.font_size)) + 1
-    return 1
-
-
-def _same_style(a: RawBlock, b: RawBlock) -> bool:
-    sizes_match = (a.font_size is None and b.font_size is None) or (
-        a.font_size is not None
-        and b.font_size is not None
-        and abs(a.font_size - b.font_size) <= SIZE_TOLERANCE
-    )
-    return sizes_match and abs(a.bold - b.bold) <= 0.3
-
-
-def _continues_heading(heading: Block, heading_raw: RawBlock, raw: RawBlock, text: str) -> bool:
-    """True when ``raw`` is the wrapped second half of the heading just emitted."""
-    if heading.type is not BlockType.HEADING or heading_raw.page != raw.page:
-        return False
-    flat = _flatten(text)
-    if numbering_info(flat) or len(flat) > MAX_CONTINUATION_CHARS:
-        return False
-    if heading.text[-1] in ".?!" or not _same_style(heading_raw, raw):
-        return False
-    if heading_raw.bbox and raw.bbox:
-        gap = raw.bbox[1] - heading_raw.bbox[3]
-        if gap > LINE_GAP_RATIO * (raw.font_size or 12.0):
-            return False
-    return True
 
 
 def _list_items(text: str, forced: bool) -> list[str]:
@@ -254,8 +270,7 @@ def _list_items(text: str, forced: bool) -> list[str]:
         return [_flatten(text)]
     items: list[str] = []
     for line in text.split("\n"):
-        marker = numbering_info(line)
-        if marker and marker[0] in LIST_KINDS:
+        if _is_item_marker(numbering_info(line)):
             items.append(line.strip())
         elif items:
             items[-1] = f"{items[-1]} {line.strip()}"
@@ -264,16 +279,97 @@ def _list_items(text: str, forced: bool) -> list[str]:
     return items
 
 
+def _is_item_marker(marker: tuple[str, int] | None) -> bool:
+    """Bullets, "a)", "1)" and plain "1." start list items."""
+    return marker is not None and (
+        marker[0] in LIST_KINDS or (marker[0] == "decimal" and marker[1] == 1)
+    )
+
+
 def _append_list(blocks: list[Block], items: list[str], raw: RawBlock) -> None:
     previous = blocks[-1] if blocks else None
-    if previous is not None and previous.type is BlockType.LIST:
+    same_role = previous is not None and previous.extra.get("role") == raw.role
+    if previous is not None and previous.type is BlockType.LIST and same_role:
         previous.extra["items"].extend(items)
         previous.text = "\n".join(previous.extra["items"])
-        previous.raw_text = f"{previous.raw_text}\n{raw.text}"
+        previous.raw_text = f"{previous.raw_text}\n{raw.original or raw.text}"
         return
     block = _block(BlockType.LIST, "\n".join(items), raw)
     block.extra["items"] = list(items)
     blocks.append(block)
+
+
+# --- Known titles (bookmarks, contents page) ----------------------------------------------
+
+
+class _TitleIndex:
+    """Heading titles the document states itself: bookmarks, else its contents page."""
+
+    def __init__(self, outline: list[OutlineEntry], raw_blocks: list[RawBlock]) -> None:
+        if outline:
+            self.titles = [
+                _Title(_key(e.title), "bookmarks", e.level, e.page)
+                for e in outline
+                if _key(e.title)
+            ]
+        else:
+            self.titles = [
+                _Title(key, "contents", None, None)
+                for key in _contents_titles(raw_blocks)
+                if len(key) >= 4
+            ]
+        self.by_start: dict[str, list[_Title]] = defaultdict(list)
+        for title in self.titles:
+            self.by_start[title.key[:4]].append(title)
+
+    def __bool__(self) -> bool:
+        return bool(self.titles)
+
+    def match(self, text: str, page: int) -> _Title | None:
+        """The known title that ``text`` is (or begins, when the title wraps on)."""
+        key = _key(text)
+        for title in self.by_start.get(key[:4], []):
+            if title.page is not None and abs(title.page - page) > 1:
+                continue
+            if key == title.key or (
+                title.key.startswith(key) and len(key) >= config.TITLE_MATCH_SHARE * len(title.key)
+            ):
+                return title
+        return None
+
+    def title_end(self, lines: list[str], page: int) -> int:
+        """Number of leading ``lines`` that form a known title, if the block goes on after it."""
+        for end in range(1, min(len(lines) - 1, config.MAX_TITLE_LINES) + 1):
+            key = _key(" ".join(lines[:end]))
+            if any(
+                t.key == key and (t.page is None or abs(t.page - page) <= 1)
+                for t in self.by_start.get(key[:4], [])
+            ):
+                return end
+        return 0
+
+
+def _contents_titles(raw_blocks: list[RawBlock]) -> list[str]:
+    """Title keys of the contents page entries ("1.1. Title … 7", wrapped titles joined)."""
+    keys: list[str] = []
+    pending = ""
+    for raw in raw_blocks:
+        if raw.role != "toc":
+            continue
+        for line in raw.text.split("\n"):
+            match = TOC_ENTRY.match(line.strip())
+            if not match or not any(c.isalpha() for c in line):
+                continue
+            pending = f"{pending} {match.group('title')}".strip()
+            if match.group("page"):
+                keys.append(_key(pending))
+                pending = ""
+    if pending:
+        keys.append(_key(pending))
+    return keys
+
+
+# --- Splitting blocks ---------------------------------------------------------------------
 
 
 def _piece(raw: RawBlock, lines: list[str], **changes: object) -> RawBlock:
@@ -284,33 +380,37 @@ def _piece(raw: RawBlock, lines: list[str], **changes: object) -> RawBlock:
         bbox=raw.bbox,
         font_size=raw.font_size,
         bold=raw.bold,
+        spaced=raw.spaced,
     )
     for name, value in changes.items():
         setattr(part, name, value)
     return part
 
 
-def _split_raw(raw: RawBlock) -> list[RawBlock]:
-    """Separate a topic title from its plan ("Reja:") and a numbered title from its body."""
+def _split_raw(raw: RawBlock, titles: _TitleIndex) -> list[RawBlock]:
+    """Separate a title from its plan ("Reja:") or body, and list items from what follows."""
     fixed = raw.rows is not None or raw.role or raw.footnote or raw.list_item
     if fixed or raw.heading_level is not None:
         return [raw]
     groups = _line_groups(raw.text)
     if len(groups) > 1:
-        parts = [_piece(raw, group, heading_level=_lone_title_level(group)) for group in groups]
+        parts = [_piece(raw, group, **_lone_title(group)) for group in groups]
         parts[0].footnote_refs = raw.footnote_refs
-        return [piece for part in parts for piece in _split_raw(part)]
+        parts[0].original = raw.original
+        return [piece for part in parts for piece in _split_raw(part, titles)]
     lines = groups[0] if groups else []
     if lines and PLAN_LINE.match(lines[0]):
         return _plan_blocks(raw, lines)
     if len(lines) < 2:
         return [raw]
+    if titles and (end := titles.title_end(lines, raw.page)):
+        return [_piece(raw, lines[:end]), *_split_raw(_piece(raw, lines[end:]), titles)]
     if cut := _list_end(lines):
         parts = [_piece(raw, lines[:cut]), _piece(raw, lines[cut:])]
         parts[0].footnote_refs = raw.footnote_refs
-        return [piece for part in parts for piece in _split_raw(part)]
+        return [piece for part in parts for piece in _split_raw(part, titles)]
     first = numbering_info(lines[0])
-    if first is None or first[0] not in ("keyword", "decimal"):
+    if first is None or first[0] not in SECTION_KINDS:
         return [raw]
 
     plan_at = next((i for i, line in enumerate(lines) if PLAN_LINE.match(line)), None)
@@ -320,7 +420,7 @@ def _split_raw(raw: RawBlock) -> list[RawBlock]:
         return [raw]
     split_at = _title_end(lines)
     if split_at:
-        title = _piece(raw, lines[:split_at], heading_level=first[1])
+        title = _piece(raw, lines[:split_at], heading_level=first[1], heading_source="numbering")
         return [title, _piece(raw, lines[split_at:])]
     return [raw]
 
@@ -336,16 +436,16 @@ def _line_groups(text: str) -> list[list[str]]:
     return [group for group in groups if group]
 
 
-def _lone_title_level(group: list[str]) -> int | None:
-    """Heading level of a single numbered line set apart by blank lines, e.g. "1.1. Title"."""
+def _lone_title(group: list[str]) -> dict[str, object]:
+    """A single numbered line set apart by blank lines, e.g. "1.1. Title", is a title."""
     if len(group) != 1:
-        return None
+        return {}
     marker = numbering_info(group[0])
     is_section = marker is not None and (marker[0] == "keyword" or marker[1] >= 2)
     title_like = group[0].strip()[-1] not in SENTENCE_END + ","
-    if marker and is_section and marker[0] != "bullet" and title_like:
-        return marker[1] if len(group[0]) <= MAX_HEADING_CHARS else None
-    return None
+    if marker and is_section and title_like and len(group[0]) <= config.MAX_HEADING_CHARS:
+        return {"heading_level": marker[1], "heading_source": "numbering"}
+    return {}
 
 
 def _list_end(lines: list[str]) -> int:
@@ -353,12 +453,11 @@ def _list_end(lines: list[str]) -> int:
 
     "- item" followed by "3.3. Next section" is a list and a new paragraph, not one item.
     """
-    first = numbering_info(lines[0])
-    if first is None or first[0] not in LIST_KINDS:
+    if not _is_item_marker(numbering_info(lines[0])):
         return 0
     for index, line in enumerate(lines[1:], start=1):
         marker = numbering_info(line)
-        if marker and marker[0] in ("decimal", "keyword"):
+        if marker and marker[0] in SECTION_KINDS and not _is_item_marker(marker):
             return index
     return 0
 
@@ -393,38 +492,283 @@ def _title_end(lines: list[str]) -> int:
     followed by a line starting a new sentence.
     """
     longest = max(len(line) for line in lines)
-    for end in range(1, min(len(lines) - 1, MAX_TITLE_LINES) + 1):
+    for end in range(1, min(len(lines) - 1, config.MAX_TITLE_LINES) + 1):
         if lines[end][0].islower():  # the title wraps onto this line
             continue
         title = " ".join(lines[:end])
         ends_like_title = title[-1] not in SENTENCE_END + ","
-        short_last_line = len(lines[end - 1]) <= TITLE_LINE_RATIO * longest
+        short_last_line = len(lines[end - 1]) <= config.TITLE_LINE_RATIO * longest
         starts_sentence = lines[end][0].isupper() or lines[end][0].isdigit()
-        fits = len(title) <= MAX_HEADING_CHARS
+        fits = len(title) <= config.MAX_HEADING_CHARS
         return end if ends_like_title and short_last_line and starts_sentence and fits else 0
     return 0
 
 
-def _join_split_paragraphs(blocks: list[Block]) -> list[Block]:
+# --- Headings -----------------------------------------------------------------------------
+
+
+def _uppercase(text: str) -> bool:
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < config.MIN_UPPERCASE_LETTERS:
+        return False
+    return sum(c.isupper() for c in letters) / len(letters) >= config.UPPERCASE_SHARE
+
+
+def has_real_words(text: str) -> bool:
+    """At least one word of 3+ letters, and mostly letters (not a formula or a label)."""
+    letters = sum(1 for c in text if c.isalpha())
+    visible = sum(1 for c in text if not c.isspace())
+    return bool(REAL_WORD.search(text)) and letters >= config.MIN_LETTER_SHARE * visible
+
+
+def _is_candidate(raw: RawBlock) -> bool:
+    """Only plain body-flow text can be a heading."""
+    return not (raw.list_item or raw.footnote or raw.role or raw.rows is not None)
+
+
+def _signals(text: str, raw: RawBlock, body_size: float) -> set[str] | None:
+    """Heading signals of a block, or ``None`` when it cannot be a heading at all."""
+    flat = _flatten(text)
+    numbering = numbering_info(flat)
+    keyword = numbering is not None and numbering[0] == "keyword"
+    limit = config.MAX_KEYWORD_HEADING_CHARS if keyword else config.MAX_HEADING_CHARS
+    if len(flat) > limit or text.count("\n") + 1 > config.MAX_HEADING_LINES:
+        return None
+    if numbering and numbering[0] == "bullet":
+        return None
+    if (not numbering and _starts_lowercase(flat)) or not has_real_words(flat):
+        return None
+    uppercase = _uppercase(flat)
+    wrapped_keyword = keyword and flat[-1] == ","
+    if (flat[-1] in ",;" and not wrapped_keyword) or (
+        flat[-1] == "." and not uppercase and not numbering
+    ):
+        return None
+
+    signals: set[str] = set()
+    if numbering:
+        signals.add("number")
+    if keyword:
+        signals.add("keyword")
+    if body_size and raw.font_size and raw.font_size >= body_size * config.LARGER_FONT_RATIO:
+        signals.add("bigger")
+    if raw.bold >= config.BOLD_SHARE:
+        signals.add("bold")
+    if uppercase:
+        signals.add("uppercase")
+    if raw.spaced:
+        signals.add("spaced")
+    return signals
+
+
+def _kind(text: str, raw: RawBlock) -> tuple[object, ...]:
+    """Level class of a heading: chapter word rank, numbering depth, or font."""
+    numbering = numbering_info(_flatten(text))
+    if numbering and numbering[0] == "keyword":
+        return ("kw", numbering[1])
+    if numbering and numbering[0] in ("decimal", "ordered"):
+        return ("dec", numbering[1])
+    return ("font", _size_key(raw.font_size or 0.0), raw.bold >= config.BOLD_SHARE)
+
+
+def _is_plain_item(text: str) -> bool:
+    """ "4. ..." / "4) ..." / "IV. ...": numbered like a list item."""
+    numbering = numbering_info(_flatten(text))
+    return numbering is not None and (numbering[0] == "ordered" or numbering == ("decimal", 1))
+
+
+def _item_number(text: str) -> int | None:
+    if match := LEADING_NUMBER.match(text):
+        return int(match.group(1).split(".")[0])
+    if match := LEADING_ROMAN.match(text):
+        values = [ROMAN[c] for c in match.group(1)]
+        return sum(
+            -v if i + 1 < len(values) and v < values[i + 1] else v for i, v in enumerate(values)
+        )
+    return None
+
+
+def _decide_headings(
+    prepared: list[tuple[RawBlock, str]], body_size: float, titles: _TitleIndex
+) -> list[_Heading | None]:
+    headings: list[_Heading | None] = []
+    plain_items: list[int] = []
+    for index, (raw, text) in enumerate(prepared):
+        size = raw.font_size or 0.0
+        if not text or not _is_candidate(raw):
+            headings.append(None)
+            continue
+        if raw.heading_level is not None and raw.heading_source == "numbering":
+            headings.append(_Heading("numbering", _kind(text, raw), size))
+            continue
+        if raw.heading_level is not None:
+            source = raw.heading_source or "style"
+            headings.append(_Heading(source, ("fixed", raw.heading_level), size, raw.heading_level))
+            continue
+        known = titles.match(text, raw.page) if titles else None
+        if known is not None and has_real_words(text):
+            headings.append(_Heading(known.source, _kind(text, raw), size, known.level))
+            continue
+        signals = _signals(text, raw, body_size)
+        if signals is None or len(signals) < config.MIN_HEADING_SIGNALS:
+            headings.append(None)
+            continue
+        source = "numbering" if "number" in signals else "font"
+        headings.append(_Heading(source, _kind(text, raw), size))
+        if _is_plain_item(text):
+            plain_items.append(index)
+    _keep_heading_sequences(headings, prepared, plain_items, body_size)
+    return headings
+
+
+def _keep_heading_sequences(
+    headings: list[_Heading | None],
+    prepared: list[tuple[RawBlock, str]],
+    plain_items: list[int],
+    body_size: float,
+) -> None:
+    """A plain "N." item stays a heading only with heading styling and as part of a numbered
+    sequence with text between its members (1., then content, then 2., ...)."""
+    groups: dict[tuple[float, bool, bool], list[int]] = defaultdict(list)
+    for index in plain_items:
+        raw, text = prepared[index]
+        groups[
+            (_size_key(raw.font_size or 0), raw.bold >= config.BOLD_SHARE, _uppercase(text))
+        ].append(index)
+
+    keep: set[int] = set()
+    for (size, bold, uppercase), members in groups.items():
+        bigger = bool(body_size) and size >= body_size * config.LARGER_FONT_RATIO
+        if not (bigger or bold or uppercase):
+            continue
+        if bigger and (bold or uppercase):
+            keep.update(members)
+            continue
+        for a, b in zip(members, members[1:], strict=False):
+            first, second = _item_number(prepared[a][1]), _item_number(prepared[b][1])
+            if first is not None and second == first + 1 and b - a > 1:
+                keep.update((a, b))
+    for index in plain_items:
+        if index not in keep:
+            headings[index] = None
+
+
+def _assign_levels(headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]]) -> None:
+    """Turn heading kinds into levels, so a child can never sit above its parent."""
+    present = [h for h in headings if h is not None and h.kind[0] != "fixed"]
+    numbered = sorted({h.kind for h in present if h.kind[0] in ("kw", "dec")}, key=_kind_order)
+    fonts = sorted({h.kind for h in present if h.kind[0] == "font"}, key=_font_order)
+    sizes = {k: statistics.median(h.size for h in present if h.kind == k) for k in numbered}
+    fixed_levels: dict[tuple[object, ...], Counter[int]] = defaultdict(Counter)
+    for h in present:
+        if h.level is not None:
+            fixed_levels[h.kind][h.level] += 1
+
+    levels: dict[tuple[object, ...], int] = {}
+    current = 0
+    for kind in numbered:
+        current = fixed_levels[kind].most_common(1)[0][0] if fixed_levels[kind] else current + 1
+        levels[kind] = current
+    deepest = current
+    for kind in fonts:
+        if fixed_levels[kind]:
+            levels[kind] = fixed_levels[kind].most_common(1)[0][0]
+            continue
+        size = kind[1]
+        peer = next((k for k in numbered if sizes[k] <= size), None)  # type: ignore[operator]
+        if peer is not None:
+            levels[kind] = levels[peer]
+        else:
+            deepest += 1
+            levels[kind] = deepest
+    for h in present:
+        if h.level is None:
+            h.level = levels[h.kind]
+    _enforce_parents(headings, prepared)
+
+
+def _font_order(kind: tuple[object, ...]) -> tuple[float, bool]:
+    """Bigger first, bold before regular."""
+    size, bold = float(kind[1]), bool(kind[2])  # type: ignore[arg-type]
+    return (-size, not bold)
+
+
+def _kind_order(kind: tuple[object, ...]) -> tuple[int, int]:
+    return (0 if kind[0] == "kw" else 1, int(kind[1]))  # type: ignore[call-overload]
+
+
+def _enforce_parents(headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]]) -> None:
+    """ "5.3" sits below "5" or the chapter it follows; never above it."""
+    last_chapter: int | None = None
+    numbered: dict[str, int] = {}
+    for heading, (_, text) in zip(headings, prepared, strict=True):
+        if heading is None or heading.level is None:
+            continue
+        if heading.kind[0] == "kw":
+            last_chapter = heading.level
+            numbered.clear()
+            continue
+        if heading.kind[0] != "dec":
+            continue
+        match = LEADING_NUMBER.match(text)
+        parts = match.group(1).split(".") if match else []
+        parent = (
+            numbered.get(".".join(parts[:-1]), last_chapter) if len(parts) > 1 else last_chapter
+        )
+        if parent is not None and heading.level <= parent:
+            heading.level = parent + 1
+        if parts:
+            numbered[".".join(parts)] = heading.level
+
+
+def _same_style(a: RawBlock, b: RawBlock) -> bool:
+    sizes_match = (a.font_size is None and b.font_size is None) or (
+        a.font_size is not None
+        and b.font_size is not None
+        and abs(a.font_size - b.font_size) <= 0.5
+    )
+    return sizes_match and abs(a.bold - b.bold) <= 0.3
+
+
+def _continues_heading(heading: Block, heading_raw: RawBlock, raw: RawBlock, text: str) -> bool:
+    """True when ``raw`` is the wrapped second half of the heading just emitted."""
+    if heading.type is not BlockType.HEADING or heading_raw.page != raw.page:
+        return False
+    flat = _flatten(text)
+    if numbering_info(flat) or len(flat) > config.MAX_CONTINUATION_CHARS:
+        return False
+    if heading.text[-1] in ".?!" or not _same_style(heading_raw, raw):
+        return False
+    if heading_raw.bbox and raw.bbox:
+        gap = raw.bbox[1] - heading_raw.bbox[3]
+        if gap > config.CONTINUATION_GAP * (raw.font_size or 12.0):
+            return False
+    return True
+
+
+# --- Joining across pages, language of short blocks ----------------------------------------
+
+
+def _join_split_paragraphs(blocks: list[Block], repair: Repair) -> list[Block]:
     """Merge a paragraph that a page break (or an in-between footnote) split in two."""
     joined: list[Block] = []
     for block in blocks:
         flow = next((b for b in reversed(joined) if b.type is not BlockType.FOOTNOTE), None)
         if flow is not None and _is_continuation(flow, block):
-            _merge_into(flow, block)
+            _merge_into(flow, block, repair)
         else:
             joined.append(block)
     return joined
 
 
-def _merge_into(previous: Block, block: Block) -> None:
+def _merge_into(previous: Block, block: Block, repair: Repair) -> None:
     """Append ``block`` to ``previous``; for a list it extends the last item."""
     if previous.type is BlockType.LIST:
         items = previous.extra["items"]
-        items[-1] = _flatten(repair_hyphenation(f"{items[-1]}\n{block.text}"))
+        items[-1] = _flatten(repair(f"{items[-1]}\n{block.text}"))
         previous.text = "\n".join(items)
     else:
-        previous.text = _flatten(repair_hyphenation(f"{previous.text}\n{block.text}"))
+        previous.text = _flatten(repair(f"{previous.text}\n{block.text}"))
     previous.raw_text = f"{previous.raw_text}\n{block.raw_text}"
     previous.extra["page_end"] = block.page
     previous.language = detect_language(previous.text)
@@ -443,3 +787,23 @@ def _is_continuation(previous: Block, block: Block) -> bool:
         and block.text[0].islower()
         and previous.text[-1] not in SENTENCE_END
     )
+
+
+def _inherit_short_languages(blocks: list[Block]) -> None:
+    """Very short blocks ("Reja:", numbers, formulas) take a neighbour's language."""
+    known = [
+        i
+        for i, block in enumerate(blocks)
+        if block.language.language != "unknown" and block.type is not BlockType.FOOTNOTE
+    ]
+    if not known:
+        return
+    for index, block in enumerate(blocks):
+        short = len(block.text.split()) < config.SHORT_BLOCK_WORDS
+        if block.language.language != "unknown" or not short:
+            continue
+        position = bisect.bisect_left(known, index)
+        source = blocks[known[position - 1] if position else known[0]]
+        block.language = LanguageInfo(
+            source.language.language, source.language.script, source.language.confidence
+        )

@@ -172,6 +172,7 @@ def test_topic_heading_starts_a_new_chunk_even_after_a_small_chunk() -> None:
         head("2.1. Pul aylanmasi", 2),
         para("Matn."),
         head("3-MAVZU: BANK", 1),
+        para("Bank matni."),
     )
     chunks = chunk(doc)
     assert [c.heading_path for c in chunks] == [
@@ -192,9 +193,59 @@ def test_new_topic_drops_the_previous_topics_subheadings_from_the_path() -> None
     assert chunk(doc)[-1].heading_path == ["4-MAVZU: RISKLAR"]
 
 
-def test_consecutive_equal_level_headings_do_not_share_a_chunk() -> None:
+def test_a_heading_is_never_left_alone_in_a_chunk() -> None:
     chunks = chunk(make_doc(head("A bob", 2), head("B bob", 2), para("Matn.")))
-    assert [c.text for c in chunks] == ["A bob", "B bob\n\nMatn."]
+    assert [c.text for c in chunks] == ["A bob\n\nB bob\n\nMatn."]
+    assert chunks[0].heading_path == ["B bob"]
+
+
+def test_trailing_heading_without_text_joins_the_previous_chunk() -> None:
+    chunks = chunk(make_doc(head("A", 1), para("Matn."), head("B", 1)))
+    assert [c.text for c in chunks] == ["A\n\nMatn.\n\nB"]
+
+
+def test_tiny_chunk_merges_into_the_previous_one_under_the_same_heading() -> None:
+    long_text = sentences(6)
+    doc = make_doc(
+        head("A", 1), para(long_text), para("Qisqa xulosa."), head("B", 1), para(long_text)
+    )
+    chunks = Chunker(max_tokens=estimate_tokens(long_text) + 10, overlap=0).chunk(doc)
+    assert [c.heading_path for c in chunks] == [["A"], ["B"]]
+    assert chunks[0].text.endswith("Qisqa xulosa.")
+
+
+def test_tiny_chunk_does_not_merge_across_headings() -> None:
+    chunks = chunk(make_doc(head("A", 1), para("Bir."), head("B", 1), para("Ikki.")))
+    assert [c.heading_path for c in chunks] == [["A"], ["B"]]
+
+
+def test_deep_heading_stays_inline_after_a_tiny_body() -> None:
+    doc = make_doc(
+        head("1. Bob", 1),
+        head("1.1. Qism", 2),
+        head("1.1.1. Band", 3),
+        para("Qisqa."),
+        head("1.1.2. Band", 3),
+        para("Yana qisqa."),
+    )
+    chunks = chunk(doc)
+    assert len(chunks) == 1
+    assert chunks[0].heading_path == ["1. Bob", "1.1. Qism"]
+
+
+def test_deep_heading_starts_a_chunk_after_a_substantial_body() -> None:
+    doc = make_doc(
+        head("1.1.1. Band", 3), para(sentences(8)), head("1.1.2. Band", 3), para("Matn.")
+    )
+    assert [c.heading_path for c in chunk(doc)] == [["1.1.1. Band"], ["1.1.2. Band"]]
+
+
+def test_figure_text_never_forms_its_own_chunk() -> None:
+    figure = with_role(para("Risklar | Kredit | Foiz"), "figure")
+    doc = make_doc(head("A", 1), para(sentences(3)), figure, head("B", 1), figure, para("Matn."))
+    chunks = chunk(doc)
+    assert len(chunks) == 2
+    assert all(c.text.replace("Risklar | Kredit | Foiz", "").strip() for c in chunks)
 
 
 def test_footnotes_stay_out_of_the_text_and_go_to_metadata() -> None:

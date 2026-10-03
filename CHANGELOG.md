@@ -17,3 +17,17 @@
 - Numbering: Uzbek order ("1-modda", "12-bob", "I BOʻLIM"), `§` sections, and legal hierarchy (part > chapter > paragraph > article); long article titles stay headings.
 - Language detection recognizes short Uzbek Latin phrases ("q" without "u", typical endings).
 - Language detection: removed English-prone Uzbek endings and ignore marker words that cover under 5% of a text.
+- Pipeline reordered: character cleanup first, then line-to-paragraph rebuilding, hyphens,
+  page analysis, headings, language, chunks.
+- Look-alike Cyrillic/Latin letters fixed per word (UTS #39 pairs); 9 apostrophe variants;
+  symbol-font characters mapped by font (Symbol / Wingdings), none left in the output.
+- Paragraphs rebuilt from lines using document statistics; figure labels grouped.
+- Hyphens of compounds that the document writes whole are kept.
+- Headings from bookmarks, contents page, numbering ("I-BOB", "5.3.Title"), font; real-word
+  and two-signal rules; "N." items are list items unless used as headings; parent/child
+  levels enforced.
+- Contents detected by shape on all its pages; glued footnote numbers ("1И.") split.
+- Tables: split header rows merged, repeated header cells dropped, running text rejected.
+- Short blocks take their neighbours' language; tiny chunks merged; headings never alone.
+- All thresholds and word lists in `config.py`; cleanup counts and heading sources in
+  `document.metadata.extra`.

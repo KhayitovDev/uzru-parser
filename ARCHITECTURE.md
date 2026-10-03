@@ -26,6 +26,26 @@ Document (blocks + metadata)  ──►  Chunker (separate step)  ──►  Chu
 Parsing and chunking are separate: the chunker only sees the `Document` model, so it can
 be improved independently.
 
+## Pipeline order (PDF)
+
+1. Character cleanup per span and line (`pdf._line`, `text.clean`): symbol-font characters
+   (Adobe Symbol / Wingdings tables, by font name), look-alike letters from the other
+   alphabet (UTS #39 confusables, per word), apostrophes, spaces. No private-use character
+   survives.
+2. Line → paragraph rebuilding (`paragraphs.py`) from the document's own statistics (body
+   font size, typical line gap, right edge, whether the producer writes one block per line);
+   figure labels are grouped (`role="figure"`).
+3. Hyphen rejoining with the document's own compounds kept (`Hyphenator`).
+4. Page furniture, footnotes, title page, contents (by shape) and back matter (`layout.py`).
+5. Headings and levels (`structure.py`): bookmarks, then the contents page, then numbering,
+   then font; a heading needs two signals and real words; a plain "N." item is a list item
+   unless it belongs to a heading sequence; a child never sits above its parent.
+6. Language per block, short blocks borrow their neighbours'; document language weighted by
+   length.
+7. Chunking.
+
+Every tunable threshold and word list lives in `config.py`.
+
 ## Python / Rust boundary
 
 * Python: file formats, orchestration, public API, data models.
