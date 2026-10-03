@@ -30,7 +30,6 @@ classifiers = [
     "Topic :: Text Processing :: Linguistic",
     "Typing :: Typed",
     "Natural Language :: Russian",
-    "Natural Language :: Uzbek",
 ]
 
 [project.urls]
