@@ -62,6 +62,9 @@ PARAGRAPH_ALIGN_TOLERANCE = 0.6
 PARAGRAPH_MAX_INDENT = 4.0
 #: A line ending this many font sizes before the right edge is "short": it can end a paragraph.
 PARAGRAPH_SHORT_LINE = 4.0
+#: A line reaching the right edge and spanning this share of the text width is running text,
+#: never a figure label.
+FULL_LINE_SHARE = 0.5
 #: Share of one-line PyMuPDF blocks above which blocks are treated as lines, not paragraphs.
 LINE_LEVEL_BLOCKS = 0.7
 
@@ -116,9 +119,29 @@ MAX_KEYWORD_MARKER_WORDS = 3
 #: A short line in capitals ending with ".", ":" or ";" right after a paragraph that stops
 #: mid-sentence is that sentence's end, not a heading.
 MAX_SENTENCE_TAIL_WORDS = 6
+#: A paragraph of at most this many words, starting with a small letter after text that
+#: stops mid-sentence, is a broken-off fragment of that sentence ("tengdir.").
+ORPHAN_WORDS = 2
 #: Text inside a quotation (an amended law quoting new articles) holds no headings of the
 #: document; a quotation still open after this many blocks is treated as a stray mark.
 MAX_QUOTED_BLOCKS = 300
+
+# --- Columns and reading order --------------------------------------------------------------
+
+#: A gutter between columns is at least this many font sizes wide; a column has at least
+#: MIN_COLUMN_LINES lines, MIN_COLUMN_WIDTH font sizes of width, and this share of its lines
+#: reach within COLUMN_RAGGED_SHARE of its width from its right edge (running text, not a
+#: list of labels or a form).
+COLUMN_GUTTER = 1.0
+MIN_COLUMN_LINES = 3
+MIN_COLUMN_WIDTH = 10.0
+COLUMN_RAGGED_SHARE = 0.15
+COLUMN_FULL_LINE_SHARE = 0.5
+#: Lines wider than this share of the page's text width (titles above columns) are left out
+#: when looking for gutters.
+SPANNING_SHARE = 0.6
+#: A filled box beside the main text with at least this many lines is read after the page.
+SIDE_BOX_MIN_LINES = 2
 
 # --- Scanned pages ----------------------------------------------------------------------------
 
@@ -167,9 +190,11 @@ MIN_RULING_PATHS = 4
 
 # --- Language and chunks --------------------------------------------------------------------
 
-#: Blocks with fewer words take the language of their neighbours when their own is unknown,
-#: or only a guess (plain Cyrillic without markers) at most this confident.
+#: Blocks take their neighbours' language when unsure: blocks with fewer words than
+#: SHORT_BLOCK_WORDS without a language or below SHORT_LANGUAGE_CONFIDENCE, and any block below
+#: LOW_LANGUAGE_CONFIDENCE (detector confidence runs from 0.5, undecided, to 1).
 SHORT_BLOCK_WORDS = 5
-WEAK_LANGUAGE_CONFIDENCE = 0.3
+SHORT_LANGUAGE_CONFIDENCE = 0.9
+LOW_LANGUAGE_CONFIDENCE = 0.7
 #: Chunks below this many tokens are merged into a neighbour under the same heading.
 MIN_CHUNK_TOKENS = 50

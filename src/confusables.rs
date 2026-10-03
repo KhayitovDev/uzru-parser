@@ -1,8 +1,11 @@
 //! Words that mix Cyrillic and Latin look-alike letters ("vаlyutа" with Cyrillic "а").
 //!
 //! The pairs are the letter-to-letter entries of the Unicode confusables list (UTS #39,
-//! confusables.txt) between the two scripts. Only true twins are listed: letters such as
-//! и л д ж ш ч ў қ ғ ҳ have no Latin twin and are never converted.
+//! confusables.txt; Unicode License v3, see LICENSES/Unicode-3.0.txt) between the two scripts. Only true twins are listed: letters such as
+//! и л д ж ш ч ў қ ғ ҳ have no Latin twin and are never converted. When both alphabets give a
+//! possible spelling, the one that is a known word wins over the majority of letters.
+
+use crate::lexicon::is_known;
 
 /// Cyrillic letter -> Latin twin.
 const CYRILLIC_TO_LATIN: &[(char, char)] = &[
@@ -102,31 +105,48 @@ fn counts(chars: &[char]) -> (usize, usize) {
         })
 }
 
-/// Make one mixed word single-script. Returns false (and changes nothing) when a minority
-/// letter has no twin or the majority cannot be decided.
+/// The word converted entirely to `target`, if every minority letter has a twin.
+fn converted(word: &[char], target: Script) -> Option<Vec<char>> {
+    word.iter()
+        .map(|&c| match script(c) {
+            Some(s) if s != target => twin(c, target),
+            _ => Some(c),
+        })
+        .collect()
+}
+
+/// Make one mixed word single-script: the alphabet whose version is a known word, else the
+/// word's majority alphabet, else the text's. Returns false (and changes nothing) when no
+/// version can be written or chosen.
 fn fix_word(word: &mut [char], text_majority: Option<Script>) -> bool {
     let (latin, cyrillic) = counts(word);
     if latin == 0 || cyrillic == 0 {
         return false;
     }
-    let target = match latin.cmp(&cyrillic) {
-        std::cmp::Ordering::Greater => Script::Latin,
-        std::cmp::Ordering::Less => Script::Cyrillic,
-        std::cmp::Ordering::Equal => match text_majority {
-            Some(target) => target,
-            None => return false,
-        },
+    let majority = match latin.cmp(&cyrillic) {
+        std::cmp::Ordering::Greater => Some(Script::Latin),
+        std::cmp::Ordering::Less => Some(Script::Cyrillic),
+        std::cmp::Ordering::Equal => text_majority,
     };
-    let minority = |c: char| script(c).is_some_and(|s| s != target);
-    if word
+    let versions: Vec<(Script, Vec<char>)> = [Script::Latin, Script::Cyrillic]
+        .into_iter()
+        .filter_map(|target| converted(word, target).map(|chars| (target, chars)))
+        .collect();
+    let known: Vec<&(Script, Vec<char>)> = versions
         .iter()
-        .any(|&c| minority(c) && twin(c, target).is_none())
-    {
+        .filter(|(_, chars)| is_known(&chars.iter().collect::<String>()))
+        .collect();
+    let chosen = match known.as_slice() {
+        [only] => Some(&only.1),
+        _ => versions
+            .iter()
+            .find(|(target, _)| Some(*target) == majority)
+            .map(|(_, chars)| chars),
+    };
+    let Some(chars) = chosen else {
         return false;
-    }
-    for c in word.iter_mut().filter(|c| minority(**c)) {
-        *c = twin(*c, target).unwrap_or(*c);
-    }
+    };
+    word.copy_from_slice(chars);
     true
 }
 
@@ -191,6 +211,13 @@ mod tests {
         ] {
             assert_eq!(fix(text), (text.to_string(), 0), "{text}");
         }
+    }
+
+    #[test]
+    fn known_word_beats_the_letter_majority() {
+        // Three Latin look-alikes against one Cyrillic "О": only "РОСТ" is a real word.
+        assert_eq!(fix("PОCT"), ("РОСТ".into(), 1));
+        assert_eq!(fix("bаnk"), ("bank".into(), 1));
     }
 
     #[test]

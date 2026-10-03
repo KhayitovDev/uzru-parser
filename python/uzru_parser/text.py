@@ -95,6 +95,23 @@ def split_sentences(text: str) -> list[str]:
     return _core.split_sentences(text)
 
 
+def is_sentence_break(left: str, right: str) -> bool:
+    """Does a sentence end between ``left`` and ``right``? Abbreviations ("ст.", "prof."),
+    initials and list numbers do not end one; text without a final delimiter runs on."""
+    return _core.is_sentence_break(left, right)
+
+
+def is_known_word(word: str) -> bool:
+    """Is ``word`` a known Uzbek (Latin or Cyrillic) or Russian word, inflected forms too?"""
+    return _core.is_known_word(word)
+
+
+def ends_with_abbreviation(text: str) -> bool:
+    """Does ``text`` end with an abbreviation or an initial ("ст.", "prof.", "Л. В.") that
+    leaves the sentence open even before a capital letter?"""
+    return text.rstrip().endswith(".") and not _core.is_sentence_break(text, "A")
+
+
 def estimate_tokens(text: str) -> int:
     """Tokenizer-free estimate (about one token per four characters of each word)."""
     return _core.estimate_tokens(text)

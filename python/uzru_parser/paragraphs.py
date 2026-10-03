@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from . import config
 from .structure import RawBlock
-from .text import numbering_info
+from .text import ends_with_abbreviation, numbering_info
 
 BBox = tuple[float, float, float, float]
 
@@ -189,10 +189,24 @@ def _is_free_label(line: Line, body_size: float) -> bool:
     )
 
 
-def figure_labels(lines: list[Line], regions: list[BBox], body_size: float) -> set[int]:
-    """Indexes of lines that are labels of a figure (chart, diagram, scheme)."""
+def figure_labels(
+    lines: list[Line], regions: list[BBox], body_size: float, right_edge: float | None = None
+) -> set[int]:
+    """Indexes of lines that are labels of a figure (chart, diagram, scheme). Lines reaching
+    the text's ``right_edge`` are running text (a narrow column, a text box), never labels."""
+
+    left_edge = min((line.bbox[0] for line in lines), default=0.0)
+
+    def full(line: Line) -> bool:
+        """Reaches the right edge and spans at least half of the text width."""
+        if right_edge is None:
+            return False
+        size = line.size or body_size
+        wide = line.bbox[2] - line.bbox[0] >= config.FULL_LINE_SHARE * (right_edge - left_edge)
+        return wide and line.bbox[2] >= right_edge - config.PARAGRAPH_SHORT_LINE * size
+
     labels: set[int] = set()
-    candidates = [i for i, line in enumerate(lines) if _is_label(line)]
+    candidates = [i for i, line in enumerate(lines) if _is_label(line) and not full(line)]
     margin = config.FIGURE_LABEL_MARGIN * body_size
     for x0, y0, x1, y1 in regions:
         region = (x0 - margin, y0 - margin, x1 + margin, y1 + margin)
@@ -202,7 +216,7 @@ def figure_labels(lines: list[Line], regions: list[BBox], body_size: float) -> s
 
     run: list[int] = []
     for i, line in enumerate([*lines, None]):
-        if line is not None and _is_free_label(line, body_size):
+        if line is not None and _is_free_label(line, body_size) and not full(line):
             run.append(i)
             continue
         if len(run) >= config.FIGURE_MIN_LABELS_WITHOUT_DRAWING:
@@ -233,7 +247,10 @@ def _continues(paragraph: list[Line], line: Line, stats: LayoutStats, page_right
     elif abs(line.bbox[0] - min(other.bbox[0] for other in paragraph[1:])) > tolerance:
         return False
 
-    sentence_break = _ends_sentence(last.text) or not _starts_lowercase(line.text)
+    open_after = ends_with_abbreviation(last.text)
+    sentence_break = not open_after and (
+        _ends_sentence(last.text) or not _starts_lowercase(line.text)
+    )
     short_last = last.bbox[2] < page_right - config.PARAGRAPH_SHORT_LINE * size
     if short_last and sentence_break:
         return False
@@ -274,7 +291,7 @@ def build_paragraphs(
     page_right = (
         _right_edge(body_right, stats.right_edge) if len(body_right) >= 3 else stats.right_edge
     )
-    labels = figure_labels(lines, regions or [], stats.body_size)
+    labels = figure_labels(lines, regions or [], stats.body_size, page_right)
 
     groups: list[tuple[str, int, list[Line]]] = []  # (kind, index of first line, lines)
     for index, line in enumerate(lines):

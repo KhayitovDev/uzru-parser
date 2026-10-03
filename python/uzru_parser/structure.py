@@ -16,7 +16,15 @@ from dataclasses import dataclass, field
 
 from . import config
 from .models import Block, BlockType, LanguageInfo
-from .text import CleanStats, Hyphenator, clean, detect_language, numbering_info
+from .text import (
+    CleanStats,
+    Hyphenator,
+    clean,
+    detect_language,
+    ends_with_abbreviation,
+    is_known_word,
+    numbering_info,
+)
 
 CELL_SEPARATOR = " | "
 SENTENCE_END = ".?!:…;"
@@ -816,15 +824,54 @@ def _continues_heading(heading: Block, heading_raw: RawBlock, raw: RawBlock, tex
 
 
 def _join_split_paragraphs(blocks: list[Block], repair: Repair, page_layout: bool) -> list[Block]:
-    """Merge a paragraph that a page break (or an in-between footnote) split in two."""
+    """Merge a paragraph split in two by a page break, a footnote or a figure, and merge
+    orphan fragments ("tengdir.") back into the sentence they end."""
     joined: list[Block] = []
     for block in blocks:
-        flow = next((b for b in reversed(joined) if b.type is not BlockType.FOOTNOTE), None)
-        if flow is not None and _is_continuation(flow, block, page_layout):
+        position = next(
+            (i for i in range(len(joined) - 1, -1, -1) if not _out_of_flow(joined[i])), None
+        )
+        flow = joined[position] if position is not None else None
+        across_figure = position is not None and any(
+            b.extra.get("role") == "figure" for b in joined[position + 1 :]
+        )
+        if flow is not None and (
+            _is_continuation(flow, block, page_layout)
+            or _is_orphan(flow, block)
+            or (across_figure and _runs_on(flow, block))
+        ):
             _merge_into(flow, block, repair)
         else:
             joined.append(block)
     return joined
+
+
+def _out_of_flow(block: Block) -> bool:
+    return block.type is BlockType.FOOTNOTE or block.extra.get("role") == "figure"
+
+
+def _runs_on(previous: Block, block: Block) -> bool:
+    """Plain text that visibly continues: no sentence end before, a small letter after, on
+    the same or the next page."""
+    if previous.type not in (BlockType.PARAGRAPH, BlockType.LIST):
+        return False
+    if block.type is not BlockType.PARAGRAPH or block.extra.get("role") or not block.text:
+        return False
+    if previous.extra.get("role") or not previous.text:
+        return False
+    last_page = previous.extra.get("page_end", previous.page)
+    last = previous.text[-1]
+    open_sentence = last.isalpha() or last in ",-"
+    return block.page in (last_page, last_page + 1) and open_sentence and block.text[0].islower()
+
+
+def _is_orphan(previous: Block, block: Block) -> bool:
+    """A one- or two-word fragment ("tengdir.") whose first word is a real word, ending the
+    sentence the previous block leaves open."""
+    words = block.text.split()
+    if not words or len(words) > config.ORPHAN_WORDS or not _runs_on(previous, block):
+        return False
+    return is_known_word(words[0].strip(".,;:!?…»”)"))
 
 
 def _merge_into(previous: Block, block: Block, repair: Repair) -> None:
@@ -857,7 +904,9 @@ def _is_continuation(previous: Block, block: Block, page_layout: bool) -> bool:
     last = previous.text[-1]
     # A page break may fall anywhere; a paragraph break only inside an unfinished sentence.
     open_sentence = (last.isalpha() or last in ",-") if same_flow else last not in SENTENCE_END
-    return tail or (open_sentence and block.text[0].islower())
+    return (
+        tail or (open_sentence and block.text[0].islower()) or ends_with_abbreviation(previous.text)
+    )
 
 
 def _is_sentence_tail(previous: Block, block: Block) -> bool:
@@ -877,36 +926,50 @@ def _is_sentence_tail(previous: Block, block: Block) -> bool:
 
 
 def _inherit_short_languages(blocks: list[Block]) -> None:
-    """Very short blocks ("Reja:", numbers, formulas) take a neighbour's language, and so do
-    short blocks whose language is only a guess ("Пул таклифи:" read as Russian for want of
-    markers), from a neighbour in the same script."""
+    """Blocks whose own language is unsure take their neighbours' language: very short blocks
+    without one ("Reja:", numbers), short blocks below ``SHORT_LANGUAGE_CONFIDENCE`` and any
+    block below ``LOW_LANGUAGE_CONFIDENCE``. A block with a language only looks at neighbours
+    in its own script; when the two neighbours disagree, the language the document mostly
+    uses in that script wins."""
 
-    def weak(block: Block) -> bool:
+    def unsure(block: Block) -> bool:
         info = block.language
-        return info.language == "unknown" or info.confidence <= config.WEAK_LANGUAGE_CONFIDENCE
+        short = len(block.text.split()) < config.SHORT_BLOCK_WORDS
+        if info.language == "unknown":
+            return short
+        if info.language == "mixed":
+            return False
+        limit = config.SHORT_LANGUAGE_CONFIDENCE if short else config.LOW_LANGUAGE_CONFIDENCE
+        return info.confidence < limit
 
     flow = [i for i, block in enumerate(blocks) if block.type is not BlockType.FOOTNOTE]
-    known = [i for i in flow if not weak(blocks[i])] or [
-        i for i in flow if blocks[i].language.language != "unknown"
-    ]
+    usable = [i for i in flow if blocks[i].language.language in ("uz", "ru")]
+    known = [i for i in usable if not unsure(blocks[i])] or usable
     if not known:
         return
+    dominant: dict[str, Counter[str]] = defaultdict(Counter)
+    for i in known:
+        info = blocks[i].language
+        dominant[info.script][info.language] += len(blocks[i].text)
+
     for index, block in enumerate(blocks):
-        if not weak(block) or len(block.text.split()) >= config.SHORT_BLOCK_WORDS:
+        if block.type is BlockType.FOOTNOTE or not unsure(block):
             continue
         position = bisect.bisect_left(known, index)
-        before = blocks[known[position - 1]] if position else None
-        after = blocks[known[position]] if position < len(known) else None
-        if block.language.language == "unknown":
-            source = before or after
-        else:
-            script = block.language.script
-            source = next(
-                (b for b in (before, after) if b is not None and b.language.script == script),
-                None,
-            )
-        if source is None or source is block:
+        following = position + 1 if position < len(known) and known[position] == index else position
+        neighbours = [blocks[known[p]] for p in (position - 1, following) if 0 <= p < len(known)]
+        if block.language.language != "unknown":
+            neighbours = [b for b in neighbours if b.language.script == block.language.script]
+        if not neighbours:
             continue
+        source = neighbours[0]
+        if (
+            len(neighbours) == 2
+            and neighbours[0].language.language != neighbours[1].language.language
+        ):
+            script = source.language.script
+            preferred = dominant[script].most_common(1)[0][0]
+            source = next((b for b in neighbours if b.language.language == preferred), source)
         block.language = LanguageInfo(
             source.language.language, source.language.script, source.language.confidence
         )

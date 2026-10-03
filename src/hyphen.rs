@@ -8,8 +8,10 @@
 //! * a few right pieces are real particles ("-то", "-либо", "-нибудь", "-таки"),
 //! * a few exact pairs are fixed words ("из-за", "во-первых").
 //!
-//! Anything else is treated as a line wrap and joined. The next line must start with a
-//! lowercase letter, so "Москва-\nГород" and "пункт 1-\n2" are never touched.
+//! Otherwise the word list decides: a real joined word is joined; two real words that do not
+//! form one are a compound and keep the hyphen ("pul-kredit"). Anything else is joined. The
+//! next line must start with a lowercase letter, so "Москва-\nГород" and "пункт 1-\n2" are
+//! never touched.
 //!
 //! Extraction also leaves wraps inside one line ("boshqa- rish"). Those are joined when
 //! the left word is entirely lowercase and the right word starts lowercase, so
@@ -36,6 +38,19 @@ const KEEP_PAIRS: &[(&str, &str)] = &[
 ];
 
 use std::collections::HashSet;
+
+use crate::lexicon::is_known;
+
+/// "audio- yoki video-": a hyphen before a conjunction stands for a shared word part and is
+/// left as written.
+const CONJUNCTIONS: &str = "va yoki hamda yohud ва ёки ҳамда ёхуд и или либо да";
+
+fn before_conjunction(right: &str) -> bool {
+    in_list(CONJUNCTIONS, &first_word(right).to_lowercase())
+}
+
+/// Each half of a compound found through the word list has at least this many letters.
+const MIN_COMPOUND_PART: usize = 3;
 
 fn is_word_char(c: char) -> bool {
     c.is_alphabetic() || c == '\u{02BB}' || c == '\u{02BC}'
@@ -80,6 +95,17 @@ fn keep_hyphen(left: &str, right: &str, keep: &HashSet<String>) -> bool {
         || (!keep.is_empty() && keep.contains(&format!("{l}-{r}")))
 }
 
+/// Two known words that are not one known word together: a compound broken at its hyphen.
+fn known_compound(left: &str, right: &str) -> bool {
+    let (left, right) = (last_word(left), first_word(right));
+    let long_enough = |w: &str| w.chars().count() >= MIN_COMPOUND_PART;
+    long_enough(left)
+        && long_enough(right)
+        && !is_known(&format!("{left}{right}"))
+        && is_known(left)
+        && is_known(right)
+}
+
 /// "i.f.n.", "A.": a single letter followed by a dot right after the hyphen.
 fn starts_with_initial(right: &str) -> bool {
     let word = first_word(right);
@@ -102,10 +128,14 @@ fn line_wrap(line: &str, next: &str, keep: &HashSet<String>) -> Wrap {
     if rev.next() != Some('-') || !rev.next().is_some_and(char::is_alphabetic) {
         return Wrap::Leave;
     }
-    if !next.chars().next().is_some_and(char::is_lowercase) || starts_with_initial(next) {
+    if !next.chars().next().is_some_and(char::is_lowercase)
+        || starts_with_initial(next)
+        || before_conjunction(next)
+    {
         return Wrap::Leave;
     }
-    if keep_hyphen(&line[..line.len() - 1], next, keep) {
+    let left = &line[..line.len() - 1];
+    if keep_hyphen(left, next, keep) || known_compound(left, next) {
         Wrap::JoinKeepingHyphen
     } else {
         Wrap::Join
@@ -129,13 +159,14 @@ fn join_inline_wraps(line: &str, keep: &HashSet<String>) -> String {
             continue;
         }
         let right_start = chars[k + 2].0;
-        if starts_with_initial(&line[right_start..]) {
+        if starts_with_initial(&line[right_start..]) || before_conjunction(&line[right_start..]) {
             continue;
         }
         let left = last_word(&line[..i]);
         let plain_word =
             left.chars().count() >= 2 && left.chars().all(|c| is_word_char(c) && !c.is_uppercase());
-        if keep_hyphen(&line[..i], &line[right_start..], keep) {
+        let (before, after) = (&line[..i], &line[right_start..]);
+        if keep_hyphen(before, after, keep) || known_compound(before, after) {
             out.push_str(&line[copied..=i]);
             copied = right_start;
         } else if plain_word {
@@ -296,7 +327,23 @@ mod tests {
             "qoʻllab-quvvatlash"
         );
         assert_eq!(repair_with("boshqa-\nrish", &keep), "boshqarish");
-        assert_eq!(repair_hyphenation("pul-\nkredit"), "pulkredit");
+    }
+
+    #[test]
+    fn word_list_tells_compounds_from_wrapped_words() {
+        for (text, expected) in [
+            ("pul-\nkredit siyosati", "pul-kredit siyosati"),
+            ("ilmiy- texnik taraqqiyot", "ilmiy-texnik taraqqiyot"),
+            ("boshqa-\nrish", "boshqarish"),
+            ("iqtisod- chilar", "iqtisodchilar"),
+            ("Настоя-\nщим документом", "Настоящим документом"),
+            ("деятель-\nности банка", "деятельности банка"),
+            ("audio- yoki videoyozuvi", "audio- yoki videoyozuvi"),
+            ("аудио- и видеозаписи", "аудио- и видеозаписи"),
+            ("ички- ва ташқи", "ички- ва ташқи"),
+        ] {
+            assert_eq!(repair_hyphenation(text), expected, "{text}");
+        }
     }
 
     #[test]
