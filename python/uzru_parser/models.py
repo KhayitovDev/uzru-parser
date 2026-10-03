@@ -19,6 +19,7 @@ class BlockType(str, Enum):
     TABLE = "table"
     CODE = "code"
     QUOTE = "quote"
+    FOOTNOTE = "footnote"
 
 
 @dataclass

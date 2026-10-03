@@ -35,6 +35,17 @@ fn is_invisible(c: char) -> bool {
     )
 }
 
+/// Private-use characters that symbol fonts (Symbol, Wingdings) use for bullets and signs.
+/// Returns the plain replacement and whether a space must follow it (bullets).
+fn map_symbol(c: char) -> Option<(char, bool)> {
+    match c {
+        '\u{F0B7}' | '\u{F02F}' | '\u{F0FC}' => Some(('•', true)),
+        '\u{F02D}' => Some(('-', true)),
+        '\u{F03D}' => Some(('=', false)),
+        _ => None,
+    }
+}
+
 fn map_space(c: char) -> char {
     match c {
         '\u{00A0}' | '\u{2007}' | '\u{202F}' | '\u{2009}' | '\u{200A}' | '\u{2002}'
@@ -47,6 +58,14 @@ fn map_space(c: char) -> char {
 /// Only applies between two Latin letters; otherwise the character is returned unchanged.
 fn uzbek_apostrophe(chars: &[char], i: usize) -> char {
     let c = chars[i];
+    // A left quote or turned comma glued to "o"/"g" is the Uzbek letter, even before a
+    // non-letter: "O‘.Haydarov".
+    let after_o_or_g = i > 0
+        && chars[i - 1].is_ascii_alphabetic()
+        && matches!(chars[i - 1].to_ascii_lowercase(), 'o' | 'g');
+    if matches!(c, '‘' | 'ʻ') && after_o_or_g {
+        return TURNED_COMMA;
+    }
     let between_latin_letters = is_apostrophe_like(c)
         && i > 0
         && chars.get(i + 1).is_some_and(char::is_ascii_alphabetic)
@@ -142,6 +161,13 @@ pub fn normalize_text(text: &str) -> String {
         match chars[i] {
             ' ' => writer.space(),
             '\n' => writer.newline(),
+            c if map_symbol(c).is_some() => {
+                let (plain, space_after) = map_symbol(c).unwrap_or((c, false));
+                writer.push(plain);
+                if space_after {
+                    writer.space();
+                }
+            }
             '.' | ELLIPSIS => {
                 let (end, dots) = dot_run(&chars, i);
                 if dots >= MIN_LEADER_DOTS {
@@ -209,6 +235,29 @@ mod tests {
         assert_eq!(normalize_text("a\u{00A0}\u{00A0}b\u{200B}c  d"), "a bc d");
         assert_eq!(normalize_text("a \n\n\n\nb"), "a\n\nb");
         assert_eq!(normalize_text("  \n\n a\r\nb  "), "a\nb");
+    }
+
+    #[test]
+    fn symbol_font_bullets_become_plain_bullets() {
+        assert_eq!(
+            normalize_text("\u{F02F}dollar (11%) va dollar"),
+            "• dollar (11%) va dollar"
+        );
+        assert_eq!(
+            normalize_text("\u{F0B7} birinchi\n\u{F0FC}ikkinchi"),
+            "• birinchi\n• ikkinchi"
+        );
+        assert_eq!(normalize_text("a \u{F03D} b"), "a = b");
+        assert_eq!(normalize_text("\u{F02D} band"), "- band");
+    }
+
+    #[test]
+    fn left_quote_after_o_or_g_is_the_uzbek_letter() {
+        assert_eq!(
+            normalize_text("O‘.Haydarov, G‘.Karimov"),
+            "O\u{02BB}.Haydarov, G\u{02BB}.Karimov"
+        );
+        assert_eq!(normalize_text("he said ‘hello’"), "he said ‘hello’");
     }
 
     #[test]

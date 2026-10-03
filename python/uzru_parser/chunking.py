@@ -10,6 +10,7 @@ from .models import Block, BlockType, Document
 from .text import detect_language, estimate_tokens, split_sentences
 
 PARAGRAPH_JOINER = "\n\n"
+DEFAULT_SKIP_ROLES = ("toc", "back_matter")
 LINE_TYPES = (BlockType.LIST, BlockType.TABLE, BlockType.CODE)
 
 
@@ -38,6 +39,7 @@ class _Unit:
     page: int
     kind: BlockType
     joiner: str = PARAGRAPH_JOINER
+    page_end: int = 0
 
 
 class Chunker:
@@ -56,6 +58,7 @@ class Chunker:
         max_tokens: int = 600,
         overlap: int = 80,
         token_counter: Callable[[str], int] | None = None,
+        skip_roles: tuple[str, ...] = DEFAULT_SKIP_ROLES,
     ) -> None:
         if max_tokens < 1:
             raise ValueError("max_tokens must be at least 1")
@@ -64,13 +67,16 @@ class Chunker:
         self.max_tokens = max_tokens
         self.overlap = overlap
         self._count = token_counter or estimate_tokens
+        self.skip_roles = skip_roles
 
     def chunk(self, document: Document) -> list[Chunk]:
         run = _Run(self, document)
         for block in document.blocks:
-            if not block.text.strip():
+            if not block.text.strip() or block.extra.get("role") in self.skip_roles:
                 continue
-            if block.type is BlockType.HEADING:
+            if block.type is BlockType.FOOTNOTE:
+                run.footnotes.append(block.text)
+            elif block.type is BlockType.HEADING:
                 run.add_heading(block, self._count(block.text))
             else:
                 for unit in self._units(block):
@@ -80,9 +86,9 @@ class Chunker:
 
     def _units(self, block: Block) -> list[_Unit]:
         tokens = self._count(block.text)
-        if tokens <= self.max_tokens:
-            return [_Unit(block.text, tokens, block.page, block.type)]
-        return self.split_unit(_Unit(block.text, tokens, block.page, block.type))
+        page_end = block.extra.get("page_end", block.page)
+        unit = _Unit(block.text, tokens, block.page, block.type, page_end=page_end)
+        return [unit] if tokens <= self.max_tokens else self.split_unit(unit)
 
     def split_unit(self, unit: _Unit) -> list[_Unit]:
         """Break a unit into sentences (or lines), and oversized pieces into word groups."""
@@ -94,7 +100,8 @@ class Chunker:
         units: list[_Unit] = []
         for piece in pieces:
             for part in self._fit(piece, joiner):
-                units.append(_Unit(part, self._count(part), unit.page, unit.kind, joiner))
+                tokens = self._count(part)
+                units.append(_Unit(part, tokens, unit.page, unit.kind, joiner, unit.page_end))
         units[0].joiner = unit.joiner
         return units
 
@@ -123,16 +130,19 @@ class _Run:
         self.headings: list[tuple[int, str]] = []
         self.units: list[_Unit] = []
         self.carry: list[_Unit] = []
+        self.footnotes: list[str] = []
 
     def add_heading(self, block: Block, tokens: int) -> None:
-        if self._has_body():
-            self.flush()
         level = block.level or 1
+        deeper_than_pending = not self.headings or level > self.headings[-1][0]
+        if self._has_body() or (self.units and not deeper_than_pending):
+            self.flush()
         while self.headings and self.headings[-1][0] >= level:
             self.headings.pop()
         self.headings.append((level, block.text))
         self.carry = []
-        self.units.append(_Unit(block.text, tokens, block.page, BlockType.HEADING))
+        unit = _Unit(block.text, tokens, block.page, BlockType.HEADING, page_end=block.page)
+        self.units.append(unit)
 
     def add_body(self, unit: _Unit) -> None:
         max_tokens = self.chunker.max_tokens
@@ -157,12 +167,14 @@ class _Run:
                 language=language.language,
                 script=language.script,
                 page_start=min(u.page for u in self.units),
-                page_end=max(u.page for u in self.units),
+                page_end=max(u.page_end or u.page for u in self.units),
                 heading_path=[title for _, title in self.headings],
                 chunk_index=index,
                 token_count=sum(u.tokens for u in parts),
+                metadata={"footnotes": self.footnotes} if self.footnotes else {},
             )
         )
+        self.footnotes = []
         self.carry = self._tail() if carry_overlap else []
         self.units = []
 

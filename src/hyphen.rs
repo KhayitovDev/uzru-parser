@@ -10,6 +10,11 @@
 //!
 //! Anything else is treated as a line wrap and joined. The next line must start with a
 //! lowercase letter, so "Москва-\nГород" and "пункт 1-\n2" are never touched.
+//!
+//! Extraction also leaves wraps inside one line ("boshqa- rish"). Those are joined when
+//! the left word is entirely lowercase and the right word starts lowercase, so
+//! "1978- yillarda" (digit), "Otamurodov- i.f.n." (capitalized, initials) and dashes
+//! with spaces on both sides are kept.
 
 /// Left pieces that form hyphenated words with almost anything that follows.
 const KEEP_LEFT: &str = "кое кто что как где куда когда какой чей северо юго восточно западно \
@@ -80,8 +85,46 @@ fn is_wrap(line: &str, next: &str) -> bool {
         && !keep_hyphen(&line[..line.len() - 1], next)
 }
 
-/// Repair `-\n` line wraps. Other text is returned unchanged.
+/// Remove a space-separated wrap ("boshqa- rish" -> "boshqarish") in one line.
+fn join_inline_wraps(line: &str) -> String {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut copied = 0;
+    for (k, &(i, c)) in chars.iter().enumerate() {
+        if c != '-' || i < copied {
+            continue;
+        }
+        let space_then_lower = chars.get(k + 1).is_some_and(|&(_, s)| s == ' ')
+            && chars.get(k + 2).is_some_and(|&(_, l)| l.is_lowercase());
+        if !space_then_lower {
+            continue;
+        }
+        let left = last_word(&line[..i]);
+        let right_start = chars[k + 2].0;
+        let right = first_word(&line[right_start..]);
+        let initials =
+            right.chars().count() == 1 && line[right_start + right.len()..].starts_with('.');
+        let plain_word =
+            left.chars().count() >= 2 && left.chars().all(|c| is_word_char(c) && !c.is_uppercase());
+        if plain_word && !initials && !keep_hyphen(&line[..i], right) {
+            out.push_str(&line[copied..i]);
+            copied = right_start;
+        }
+    }
+    out.push_str(&line[copied..]);
+    out
+}
+
+/// Repair `-\n` line wraps and inline "word- word" wraps. Other text is returned unchanged.
 pub fn repair_hyphenation(text: &str) -> String {
+    join_line_wraps(text)
+        .split('\n')
+        .map(join_inline_wraps)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn join_line_wraps(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut lines = text.split('\n').peekable();
     while let Some(first) = lines.next() {
@@ -144,6 +187,50 @@ mod tests {
         assert_eq!(repair_hyphenation("a - b\nc"), "a - b\nc");
         assert_eq!(repair_hyphenation("пункт 1-\n2"), "пункт 1-\n2");
         assert_eq!(repair_hyphenation("конец-\n"), "конец-\n");
+    }
+
+    #[test]
+    fn joins_inline_wraps() {
+        assert_eq!(
+            repair_hyphenation("boshqa- rish metodo- logiyasi"),
+            "boshqarish metodologiyasi"
+        );
+        assert_eq!(
+            repair_hyphenation("da- rajasini miq- dorini"),
+            "darajasini miqdorini"
+        );
+        assert_eq!(repair_hyphenation("bogʻliq- liklarni"), "bogʻliqliklarni");
+    }
+
+    #[test]
+    fn joins_inline_wraps_before_a_full_stop() {
+        assert_eq!(
+            repair_hyphenation("komission operatsi- yalar. Pul"),
+            "komission operatsiyalar. Pul"
+        );
+        assert_eq!(
+            repair_hyphenation("gʻarbona tiqish- tirish."),
+            "gʻarbona tiqishtirish."
+        );
+        assert_eq!(
+            repair_hyphenation("H.Otamurodov- i.f.n., dotsent"),
+            "H.Otamurodov- i.f.n., dotsent"
+        );
+    }
+
+    #[test]
+    fn keeps_real_hyphens_and_dashes() {
+        for text in [
+            "1978- yillarda",
+            "nashriyot-matbaa",
+            "Otamurodov- i.f.n., dotsent",
+            "Toshkent - 2021 yil",
+            "pul – tovar",
+            "кто- то",
+            "BMT- ning",
+        ] {
+            assert_eq!(repair_hyphenation(text), text, "{text}");
+        }
     }
 
     #[test]
