@@ -128,6 +128,11 @@ the original `raw_text`, page number, optional bbox, and per-block language.
 `Document` will carry a parse-confidence signal so low-confidence results can be handed
 to an optional OCR/Docling fallback. Not implemented.
 
-## Build
+## Build and packaging
 
-`maturin` builds `uzru_parser._core` from `src/` (PyO3); pure Python lives in `python/`.
+`maturin` builds `uzru_parser._core` from `src/` (PyO3, stable ABI `abi3-py310`, so one wheel
+per platform serves CPython 3.10+); pure Python lives in `python/`. PyMuPDF (AGPL-3.0) is the
+optional `pdf` extra: `parser.py` imports the PDF reader only when a PDF is parsed and raises
+an `ImportError` naming the extra when it is missing. Unreadable files (empty, damaged,
+password-protected, unsupported) raise `DocumentError`. `.github/workflows/release.yml`
+builds and tests the wheels and the sdist and publishes them with PyPI Trusted Publishing.

@@ -82,6 +82,7 @@ All are used unmodified, as published on crates.io.
 | [pyarrow](https://github.com/apache/arrow) | Apache-2.0 | Reading uz-books Parquet files in `tools/` |
 | razdel evaluation corpora | see razdel | Measuring sentence splitting; not included |
 | pytest, ruff, mypy, maturin | MIT / Apache-2.0 | Testing and building |
+| [DejaVu Sans](https://dejavu-fonts.github.io/) fonts in `tests/fonts/` | Bitstream Vera licence (DejaVu changes public domain); notice in `tests/fonts/LICENSE` | Generating test PDFs the same way on every platform; not installed with the package |
 
 Material reviewed and deliberately **not** used because of its licence: Uzbek and Russian
 Hunspell dictionaries (GPL), Text-Hyphen-RU patterns (GPL-3.0), Pyphen dictionaries

@@ -65,7 +65,7 @@ def parse_pdf(path: str | Path, detect_tables: bool = True) -> Document:
     pages: list[Page] = []
     contents: list[_PageContent] = []
 
-    with _PYMUPDF_LOCK, pymupdf.open(path) as pdf:  # type: ignore[no-untyped-call]
+    with _PYMUPDF_LOCK, _open(path) as pdf:
         meta = pdf.metadata or {}
         outline = [
             OutlineEntry(level=entry[0], title=clean(entry[1]), page=entry[2])
@@ -118,6 +118,20 @@ def parse_pdf(path: str | Path, detect_tables: bool = True) -> Document:
         author=meta.get("author"),
         extra={"removed_page_furniture": removed, **stats.as_dict()},
     )
+
+
+def _open(path: Path) -> pymupdf.Document:
+    """Open a PDF, turning PyMuPDF's errors into clear ones."""
+    from .parser import DocumentError
+
+    try:
+        pdf = pymupdf.open(path)  # type: ignore[no-untyped-call]
+    except (pymupdf.FileDataError, pymupdf.EmptyFileError, RuntimeError) as error:
+        raise DocumentError(f"{path.name} is not a valid PDF file") from error
+    if pdf.needs_pass:
+        pdf.close()  # type: ignore[no-untyped-call]
+        raise DocumentError(f"{path.name} is password-protected")
+    return pdf
 
 
 def _title_page_title(blocks: list[RawBlock]) -> str | None:
