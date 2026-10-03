@@ -12,6 +12,8 @@ from .layout import strip_page_furniture
 from .models import Document, Page
 from .structure import RawBlock, build_blocks
 
+BBox = tuple[float, float, float, float]
+
 PYMUPDF_BOLD_FLAG = 16
 IMAGE_BLOCK = 1
 MIN_TEXT_CHARS = 25
@@ -73,7 +75,7 @@ def _extract_page(page: pymupdf.Page, number: int, detect_tables: bool) -> _Page
         if raw is None:
             continue
         chars += len(raw.text.strip())
-        if not any(_inside(raw, table) for table in tables):
+        if not any(_inside(raw.bbox, table.bbox) for table in tables):
             blocks.append(raw)
 
     blocks = _merge_tables(blocks, tables)
@@ -115,11 +117,12 @@ def _find_tables(page: pymupdf.Page, number: int) -> list[RawBlock]:
     return tables
 
 
-def _inside(raw: RawBlock, table: RawBlock) -> bool:
-    assert raw.bbox is not None and table.bbox is not None
-    cx, cy = (raw.bbox[0] + raw.bbox[2]) / 2, (raw.bbox[1] + raw.bbox[3]) / 2
-    x0, y0, x1, y1 = table.bbox
-    return x0 <= cx <= x1 and y0 <= cy <= y1
+def _inside(box: BBox | None, container: BBox | None) -> bool:
+    """True when the centre of ``box`` lies within ``container``."""
+    if box is None or container is None:
+        return False
+    cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    return container[0] <= cx <= container[2] and container[1] <= cy <= container[3]
 
 
 def _merge_tables(blocks: list[RawBlock], tables: list[RawBlock]) -> list[RawBlock]:

@@ -10,3 +10,6 @@
 - DOCX parser (styles, lists, tables, approximate pages from page breaks).
 - PDF: ruled-table detection, running header/footer and page-number removal, per-page `needs_ocr` flag.
 - Rust: table-of-contents dot leaders collapse to a single ellipsis during normalization.
+- Faster language detection (about 2.5x) and a single-pass normalizer; shared character helpers.
+- Hyphenation keeps "по-русски" style adverbs and acronym suffixes ("BMT-ning").
+- Numbering recognizes "ПРИЛОЖЕНИЕ № 1" and roman sections ("I. Общие положения").

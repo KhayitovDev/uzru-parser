@@ -5,22 +5,20 @@
 //! * `ё` is never turned into `е`.
 //! * Uzbek apostrophes are only rewritten when they sit *between two Latin letters*,
 //!   so quotes, Cyrillic text and standalone punctuation are left alone.
+//! * Table-of-contents dot leaders ("........") collapse to a single ellipsis.
 
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{is_nfc, UnicodeNormalization};
+
+use crate::chars::is_apostrophe;
 
 /// Canonical Uzbek Latin modifier letters (Unicode recommendation).
 const TURNED_COMMA: char = '\u{02BB}'; // ʻ  in oʻ, gʻ
 const APOSTROPHE: char = '\u{02BC}'; // ʼ  tutuq belgisi, e.g. maʼlumot
+const ELLIPSIS: char = '\u{2026}';
+const MIN_LEADER_DOTS: usize = 4;
 
 fn is_apostrophe_like(c: char) -> bool {
-    matches!(
-        c,
-        '\'' | '\u{2019}' | '\u{2018}' | '\u{02BB}' | '\u{02BC}' | '`' | '\u{00B4}' | '\u{02B9}'
-    )
-}
-
-fn is_latin_letter(c: char) -> bool {
-    c.is_ascii_alphabetic()
+    is_apostrophe(c) || matches!(c, '´' | 'ʹ')
 }
 
 /// Characters that carry no visible content in extracted text.
@@ -33,6 +31,7 @@ fn is_invisible(c: char) -> bool {
             | '\u{200D}' // zero width joiner
             | '\u{2060}' // word joiner
             | '\u{FEFF}' // BOM / zero width no-break space
+            | '\r'
     )
 }
 
@@ -44,107 +43,127 @@ fn map_space(c: char) -> char {
     }
 }
 
-/// Rewrite apostrophe variants that sit between two Latin letters.
 /// `o`/`g` + apostrophe -> U+02BB (oʻ, gʻ); any other letter + apostrophe -> U+02BC (maʼlumot).
-fn fix_uzbek_apostrophes(chars: &[char]) -> Vec<char> {
-    let mut out = Vec::with_capacity(chars.len());
-    for (i, &c) in chars.iter().enumerate() {
-        let between_letters = is_apostrophe_like(c)
-            && i > 0
-            && i + 1 < chars.len()
-            && is_latin_letter(chars[i - 1])
-            && is_latin_letter(chars[i + 1]);
-        if between_letters {
-            let prev = chars[i - 1].to_ascii_lowercase();
-            out.push(if prev == 'o' || prev == 'g' {
-                TURNED_COMMA
-            } else {
-                APOSTROPHE
-            });
-        } else {
-            out.push(c);
-        }
+/// Only applies between two Latin letters; otherwise the character is returned unchanged.
+fn uzbek_apostrophe(chars: &[char], i: usize) -> char {
+    let c = chars[i];
+    let between_latin_letters = is_apostrophe_like(c)
+        && i > 0
+        && chars.get(i + 1).is_some_and(char::is_ascii_alphabetic)
+        && chars[i - 1].is_ascii_alphabetic();
+    match (
+        between_latin_letters,
+        chars[i.saturating_sub(1)].to_ascii_lowercase(),
+    ) {
+        (false, _) => c,
+        (true, 'o' | 'g') => TURNED_COMMA,
+        (true, _) => APOSTROPHE,
     }
-    out
 }
 
-/// Replace table-of-contents dot leaders ("Статья 5 ........ 12") with a single ellipsis.
-/// A leader is four or more dots, optionally separated by single spaces; an ellipsis
-/// character counts as three dots, so ordinary "..." and "…" are left alone.
-fn collapse_dot_leaders(chars: &[char]) -> Vec<char> {
-    let is_dot = |c: char| c == '.' || c == '\u{2026}';
-    let weight = |c: char| if c == '.' { 1 } else { 3 };
-    let mut out = Vec::with_capacity(chars.len());
-    let mut i = 0;
-    while i < chars.len() {
-        if !is_dot(chars[i]) {
-            out.push(chars[i]);
-            i += 1;
-            continue;
+/// End index and dot count of a run of dots starting at `start`. Single spaces between
+/// dots belong to the run; an ellipsis character counts as three dots.
+fn dot_run(chars: &[char], start: usize) -> (usize, usize) {
+    let is_dot = |c: char| c == '.' || c == ELLIPSIS;
+    let (mut end, mut dots, mut j) = (start, 0, start);
+    while j < chars.len() {
+        if is_dot(chars[j]) {
+            dots += if chars[j] == '.' { 1 } else { 3 };
+            j += 1;
+            end = j;
+        } else if chars[j] == ' ' && chars.get(j + 1).copied().is_some_and(is_dot) {
+            j += 1;
+        } else {
+            break;
         }
-        let (mut end, mut dots, mut j) = (i, 0, i);
-        while j < chars.len() {
-            if is_dot(chars[j]) {
-                dots += weight(chars[j]);
-                j += 1;
-                end = j;
-            } else if chars[j] == ' ' && j + 1 < chars.len() && is_dot(chars[j + 1]) {
-                j += 1;
-            } else {
-                break;
+    }
+    (end, dots)
+}
+
+/// Output buffer that collapses spaces and limits blank lines while text is appended.
+struct Writer {
+    out: String,
+    pending_space: bool,
+    newlines: u8,
+}
+
+impl Writer {
+    fn new(capacity: usize) -> Self {
+        Writer {
+            out: String::with_capacity(capacity),
+            pending_space: false,
+            newlines: 0,
+        }
+    }
+
+    fn space(&mut self) {
+        self.pending_space = true;
+    }
+
+    fn newline(&mut self) {
+        self.pending_space = false;
+        self.newlines = self.newlines.saturating_add(1);
+    }
+
+    fn push(&mut self, c: char) {
+        if !self.out.is_empty() {
+            // At most one blank line between paragraphs; spaces never lead a line.
+            for _ in 0..self.newlines.min(2) {
+                self.out.push('\n');
+            }
+            if self.newlines == 0 && self.pending_space {
+                self.out.push(' ');
             }
         }
-        if dots >= 4 {
-            out.extend([' ', '\u{2026}', ' ']);
-        } else {
-            out.extend_from_slice(&chars[i..end]);
-        }
-        i = end;
+        self.newlines = 0;
+        self.pending_space = false;
+        self.out.push(c);
     }
-    out
 }
 
 /// Normalize text: NFC, drop invisible chars, unify spaces, fix Uzbek apostrophes,
 /// collapse dot leaders, runs of spaces and blank lines. Line structure (`\n`) is preserved.
 pub fn normalize_text(text: &str) -> String {
-    let nfc: Vec<char> = text
-        .nfc()
-        .filter(|&c| !is_invisible(c))
-        .map(map_space)
-        .filter(|&c| c != '\r')
-        .collect();
-    let fixed = collapse_dot_leaders(&fix_uzbek_apostrophes(&nfc));
+    let chars: Vec<char> = if is_nfc(text) {
+        text.chars()
+            .filter(|&c| !is_invisible(c))
+            .map(map_space)
+            .collect()
+    } else {
+        text.nfc()
+            .filter(|&c| !is_invisible(c))
+            .map(map_space)
+            .collect()
+    };
 
-    let mut out = String::with_capacity(fixed.len());
-    let mut prev_space = false;
-    let mut newlines = 0u8;
-    for c in fixed {
-        match c {
-            ' ' => {
-                prev_space = true;
-            }
-            '\n' => {
-                prev_space = false;
-                newlines = newlines.saturating_add(1);
-            }
-            _ => {
-                if newlines > 0 {
-                    // At most one blank line between paragraphs; none before the first text.
-                    if !out.is_empty() {
-                        for _ in 0..newlines.min(2) {
-                            out.push('\n');
+    let mut writer = Writer::new(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            ' ' => writer.space(),
+            '\n' => writer.newline(),
+            '.' | ELLIPSIS => {
+                let (end, dots) = dot_run(&chars, i);
+                if dots >= MIN_LEADER_DOTS {
+                    writer.space();
+                    writer.push(ELLIPSIS);
+                    writer.space();
+                } else {
+                    for (offset, &c) in chars[i..end].iter().enumerate() {
+                        match c {
+                            ' ' => writer.space(),
+                            _ => writer.push(uzbek_apostrophe(&chars, i + offset)),
                         }
                     }
-                    newlines = 0;
-                } else if prev_space && !out.is_empty() {
-                    out.push(' ');
                 }
-                prev_space = false;
-                out.push(c);
+                i = end;
+                continue;
             }
+            _ => writer.push(uzbek_apostrophe(&chars, i)),
         }
+        i += 1;
     }
-    out
+    writer.out
 }
 
 #[cfg(test)]
@@ -189,5 +208,11 @@ mod tests {
     fn whitespace_and_invisibles() {
         assert_eq!(normalize_text("a\u{00A0}\u{00A0}b\u{200B}c  d"), "a bc d");
         assert_eq!(normalize_text("a \n\n\n\nb"), "a\n\nb");
+        assert_eq!(normalize_text("  \n\n a\r\nb  "), "a\nb");
+    }
+
+    #[test]
+    fn decomposed_input_is_composed() {
+        assert_eq!(normalize_text("и\u{0306}"), "й");
     }
 }

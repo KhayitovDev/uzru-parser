@@ -1,5 +1,7 @@
 //! Detection of section numbering and list markers at the start of a line.
 
+use crate::chars::is_apostrophe;
+
 pub struct Numbering {
     pub kind: &'static str,
     pub depth: usize,
@@ -26,10 +28,6 @@ const KEYWORDS: &[(&str, usize)] = &[
 
 const BULLETS: &[char] = &['•', '·', '▪', '●', '○', '■', '◦', '–', '—', '-', '*'];
 
-fn is_apostrophe(c: char) -> bool {
-    matches!(c, '\'' | '’' | '‘' | 'ʻ' | 'ʼ' | '`')
-}
-
 fn keyword_depth(text: &str) -> Option<usize> {
     let end = text
         .find(|c: char| !(c.is_alphabetic() || is_apostrophe(c)))
@@ -45,7 +43,13 @@ fn keyword_depth(text: &str) -> Option<usize> {
     if !rest.starts_with(char::is_whitespace) {
         return None;
     }
-    let next = rest.trim_start().chars().next()?;
+    let rest = rest.trim_start();
+    let next = rest
+        .strip_prefix('№')
+        .unwrap_or(rest)
+        .trim_start()
+        .chars()
+        .next()?;
     (next.is_ascii_digit() || matches!(next, 'I' | 'V' | 'X' | 'L' | 'C')).then_some(*depth)
 }
 
@@ -73,6 +77,19 @@ fn decimal_depth(text: &str) -> Option<usize> {
     let rest = &text[i..];
     let has_title = rest.starts_with(char::is_whitespace) && !rest.trim().is_empty();
     (has_title && (trailing_dot || groups > 1)).then_some(groups)
+}
+
+/// Latin roman numeral followed by a dot and a title: "I. Общие положения".
+fn roman_depth(text: &str) -> Option<usize> {
+    let numeral: String = text
+        .chars()
+        .take_while(|c| matches!(c, 'I' | 'V' | 'X' | 'L' | 'C'))
+        .collect();
+    let rest = text[numeral.len()..].strip_prefix('.')?;
+    let valid = (1..=6).contains(&numeral.len())
+        && rest.starts_with(char::is_whitespace)
+        && !rest.trim().is_empty();
+    valid.then_some(1)
 }
 
 fn is_bullet(text: &str) -> bool {
@@ -103,6 +120,12 @@ pub fn numbering_info(line: &str) -> Option<Numbering> {
         });
     }
     if let Some(depth) = decimal_depth(text) {
+        return Some(Numbering {
+            kind: "decimal",
+            depth,
+        });
+    }
+    if let Some(depth) = roman_depth(text) {
         return Some(Numbering {
             kind: "decimal",
             depth,
@@ -142,6 +165,15 @@ mod tests {
     }
 
     #[test]
+    fn roman_sections() {
+        assert_eq!(info("I. Общие положения"), Some(("decimal", 1)));
+        assert_eq!(info("IV. UMUMIY QOIDALAR"), Some(("decimal", 1)));
+        assert_eq!(info("I."), None);
+        assert_eq!(info("Index. text"), None);
+        assert_eq!(info("И. И. Иванов"), None);
+    }
+
+    #[test]
     fn keywords() {
         assert_eq!(info("Статья 5. Права сторон"), Some(("keyword", 3)));
         assert_eq!(info("РАЗДЕЛ II"), Some(("keyword", 1)));
@@ -149,6 +181,8 @@ mod tests {
         assert_eq!(info("Modda 12"), Some(("keyword", 3)));
         assert_eq!(info("МОДДА 7. Тартиб"), Some(("keyword", 3)));
         assert_eq!(info("Статья без номера"), None);
+        assert_eq!(info("ПРИЛОЖЕНИЕ № 1"), Some(("keyword", 1)));
+        assert_eq!(info("Ilova №2"), Some(("keyword", 1)));
     }
 
     #[test]

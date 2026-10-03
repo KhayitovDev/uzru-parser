@@ -31,3 +31,8 @@ def test_apostrophes_outside_words_untouched() -> None:
 def test_hyphenation_keeps_legitimate_compounds() -> None:
     assert repair_hyphenation("кто-\nто") == "кто-\nто"
     assert repair_hyphenation("Настоя-\nщим") == "Настоящим"
+
+
+@pytest.mark.parametrize("text", ["по-\nрусски", "BMT-\nning qarori", "когда-\nнибудь"])
+def test_hyphenation_keeps_prefix_adverbs_and_acronym_suffixes(text: str) -> None:
+    assert repair_hyphenation(text) == text

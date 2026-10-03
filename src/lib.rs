@@ -5,6 +5,7 @@
 
 use pyo3::prelude::*;
 
+mod chars;
 mod hyphen;
 mod lang;
 mod normalize;

@@ -20,7 +20,6 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "maturin>=1.7,<2.0"]
-bench = ["docling", "psutil"]
 
 [tool.maturin]
 python-source = "python"

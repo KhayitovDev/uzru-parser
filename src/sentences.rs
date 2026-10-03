@@ -1,5 +1,7 @@
 //! Rule-based sentence splitting for Russian and Uzbek.
 
+use crate::chars::is_apostrophe;
+
 const TERMINATORS: &[char] = &['.', '!', '?', '…'];
 const CLOSERS: &[char] = &['"', '»', '”', ')', '’', '\''];
 const OPENERS: &[char] = &['«', '"', '“', '(', '„'];
@@ -9,10 +11,6 @@ const ABBREVIATIONS: &[&str] = &[
     "проф", "доц", "акад", "стр", "рис", "табл", "ред", "изд", "обл", "корп", "оф", "кв", "тел",
     "kv", "koch", "tel", "sh", "mln", "mlrd", "ming", "минг",
 ];
-
-fn is_apostrophe(c: char) -> bool {
-    matches!(c, '\'' | '’' | '‘' | 'ʻ' | 'ʼ' | '`')
-}
 
 /// The alphanumeric word that ends right before `end`.
 fn word_before(text: &str, end: usize) -> &str {
