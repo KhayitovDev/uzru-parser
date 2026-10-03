@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pymupdf
 import pytest
-from uzru_parser import BlockType, Parser, parse
+from uzru_parser import BlockType, Parser, chunk, parse
 
 FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -88,3 +88,40 @@ def test_pdf_line_wrap_hyphenation(tmp_path: Path) -> None:
 def test_unsupported_extension(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         parse(tmp_path / "file.xyz")
+
+
+def test_headings_lists_and_chunks_from_pdf(tmp_path: Path) -> None:
+    regular, bold = (
+        cyrillic_font(),
+        cyrillic_font().replace("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"),
+    )
+    if not Path(bold).exists():
+        pytest.skip("bold font not available")
+    pdf_path = tmp_path / "structured.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_font(fontname="regular", fontfile=regular)
+    page.insert_font(fontname="bold", fontfile=bold)
+    page.insert_text((72, 80), "1. ОБЩИЕ ПОЛОЖЕНИЯ", fontname="bold", fontsize=14)
+    page.insert_textbox(
+        pymupdf.Rect(72, 100, 523, 200),
+        "Настоящий договор является основанием для оказания услуг по договору.",
+        fontname="regular",
+        fontsize=11,
+    )
+    page.insert_text((72, 220), "1.1. Основные понятия", fontname="bold", fontsize=11)
+    page.insert_text((72, 240), "• первый пункт списка", fontname="regular", fontsize=11)
+    page.insert_text((72, 255), "• второй пункт списка", fontname="regular", fontsize=11)
+    doc.save(pdf_path)
+    doc.close()
+
+    document = parse(pdf_path)
+    assert [b.type for b in document.blocks] == [
+        BlockType.HEADING,
+        BlockType.PARAGRAPH,
+        BlockType.HEADING,
+        BlockType.LIST,
+    ]
+    assert [b.level for b in document.blocks if b.type is BlockType.HEADING] == [1, 2]
+    chunks = chunk(document)
+    assert chunks[-1].heading_path == ["1. ОБЩИЕ ПОЛОЖЕНИЯ", "1.1. Основные понятия"]

@@ -1,4 +1,4 @@
-"""PDF extraction with PyMuPDF. Produces paragraph blocks; structure detection comes later."""
+"""PDF extraction with PyMuPDF."""
 
 from __future__ import annotations
 
@@ -6,45 +6,27 @@ from pathlib import Path
 
 import pymupdf
 
-from .models import Block, BlockType, Document, DocumentMetadata, Page, make_document_id
-from .text import detect_language, normalize, repair_hyphenation
+from .models import Document, DocumentMetadata, Page, make_document_id
+from .structure import RawBlock, build_blocks
+from .text import detect_language
+
+PYMUPDF_BOLD_FLAG = 16
 
 
 def parse_pdf(path: str | Path) -> Document:
     path = Path(path)
     pages: list[Page] = []
-    blocks: list[Block] = []
+    raw_blocks: list[RawBlock] = []
 
     with pymupdf.open(path) as pdf:  # type: ignore[no-untyped-call]
         meta = pdf.metadata or {}
-        for index, page in enumerate(pdf, start=1):
-            page_blocks = 0
-            # sort=True gives reading order (top-to-bottom, left-to-right).
-            for x0, y0, x1, y1, raw, _no, kind in page.get_text("blocks", sort=True):
-                if kind != 0:  # 0 = text, 1 = image
-                    continue
-                text = normalize(repair_hyphenation(raw))
-                if not text:
-                    continue
-                blocks.append(
-                    Block(
-                        type=BlockType.PARAGRAPH,
-                        text=text.replace("\n", " "),
-                        raw_text=raw,
-                        page=index,
-                        bbox=(x0, y0, x1, y1),
-                        language=detect_language(text),
-                    )
-                )
-                page_blocks += 1
-            pages.append(
-                Page(
-                    number=index,
-                    width=page.rect.width,
-                    height=page.rect.height,
-                    block_count=page_blocks,
-                )
-            )
+        for number, page in enumerate(pdf, start=1):
+            pages.append(Page(number=number, width=page.rect.width, height=page.rect.height))
+            raw_blocks.extend(_raw_blocks(page, number))
+
+    blocks = build_blocks(raw_blocks)
+    for block in blocks:
+        pages[block.page - 1].block_count += 1
 
     document = Document(
         metadata=DocumentMetadata(
@@ -60,3 +42,35 @@ def parse_pdf(path: str | Path) -> Document:
     document.language = detect_language(document.text)
     document.document_id = make_document_id(path.name, document.text)
     return document
+
+
+def _raw_blocks(page: pymupdf.Page, number: int) -> list[RawBlock]:
+    blocks: list[RawBlock] = []
+    page_dict = page.get_text("dict", sort=True)  # type: ignore[no-untyped-call]
+    for block in page_dict["blocks"]:
+        if block["type"] != 0:
+            continue
+        lines: list[str] = []
+        sizes: list[float] = []
+        chars = bold_chars = 0
+        for line in block["lines"]:
+            spans = line["spans"]
+            lines.append("".join(span["text"] for span in spans))
+            for span in spans:
+                length = len(span["text"].strip())
+                chars += length
+                sizes.extend([span["size"]] * length)
+                if span["flags"] & PYMUPDF_BOLD_FLAG or "bold" in span["font"].lower():
+                    bold_chars += length
+        if not chars:
+            continue
+        blocks.append(
+            RawBlock(
+                text="\n".join(lines),
+                page=number,
+                bbox=tuple(block["bbox"]),
+                font_size=max(sizes),
+                bold=bold_chars / chars,
+            )
+        )
+    return blocks

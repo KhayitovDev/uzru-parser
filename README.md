@@ -4,14 +4,15 @@ CPU-first document parser and chunker for **Russian** and **Uzbek** (Latin and C
 documents, built for RAG. Python API on top of a small Rust core (PyO3 + maturin).
 No GPU, no ML models, no network calls.
 
-> Status: early development (v0.1.0). PDF parsing works; DOCX, structure detection and
-> chunking are not implemented yet. No performance claims are made until benchmarks exist.
+> Status: early development (v0.1.0). PDF parsing with heading/list detection and structural
+> chunking work; DOCX, tables and header/footer removal are not implemented yet. No performance claims are made until benchmarks exist.
 
 ```python
-from uzru_parser import parse
+from uzru_parser import Chunker, parse
 
 document = parse("contract.pdf")
-print(document.language.locale, len(document.blocks))
+chunks = Chunker(max_tokens=600, overlap=80).chunk(document)
+print(chunks[0].heading_path, chunks[0].page_start, chunks[0].text[:80])
 ```
 
 ## Development

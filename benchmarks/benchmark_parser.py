@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 import pymupdf
-from uzru_parser import parse
+from uzru_parser import chunk, parse
 from uzru_parser.text import detect_language, normalize, repair_hyphenation
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
@@ -46,6 +46,8 @@ def main() -> None:
         pdf = Path(tmp) / "bench.pdf"
         make_pdf(pdf, pages)
         timed(f"parse PDF ({pages} pages)", lambda: parse(pdf), pages, "pages")
+        document = parse(pdf)
+        timed(f"chunk ({pages} pages)", lambda: chunk(document), pages, "pages")
 
     text = PARAGRAPH * 20_000
     mb = len(text.encode()) / 1e6

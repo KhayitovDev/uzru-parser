@@ -17,7 +17,7 @@ Python API  (parse / Parser, later chunk / Chunker, CLI)
    ▼
 Rust core  (uzru_parser._core, embedded native extension)
    normalize_text · repair_hyphenation · detect_language
-   (planned: line reconstruction, sentence splitting, chunking)
+   numbering_info · split_sentences · estimate_tokens
    │
    ▼
 Document (blocks + metadata)  ──►  Chunker (separate step)  ──►  Chunks
@@ -32,6 +32,26 @@ be improved independently.
 * Rust: deterministic text processing. Each function takes a string and returns plain
   values, so crossing the boundary is cheap and there is no shared state.
 * No separate process, service or HTTP layer.
+
+## Structure detection (`structure.py`)
+
+Format readers produce `RawBlock`s (text, page, bbox, font size, bold share).
+`build_blocks` turns them into typed blocks:
+
+* **Heading**: score from larger-than-body font (+2), bold (+1), uppercase (+2 if short),
+  numbering (`1.`, `1.1.` +1; `Статья 5`, `Modda 3`, `Bo‘lim 2` +2). Score ≥ 2 and a short
+  line without sentence punctuation. Level comes from numbering depth, else font-size rank.
+* **List**: lines starting with a bullet or `1)` / `a)`; adjacent list blocks are merged.
+* A long numbered clause (`1.1. Стороны обязуются ...`) stays a paragraph.
+
+## Chunking (`chunking.py`)
+
+Input is only the `Document`. Every heading starts a new chunk; inside a section whole
+blocks are packed up to `max_tokens`. Oversized blocks are split by sentences (lines for
+lists/tables, words as a last resort). Overlap repeats trailing sentences of the previous
+chunk within the same section only. Tokens are estimated (about 4 characters per token);
+pass `token_counter` to use a real tokenizer. Each chunk carries `heading_path`, page range,
+language/script and an extensible `metadata` dict.
 
 ## Data model (`python/uzru_parser/models.py`)
 

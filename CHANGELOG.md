@@ -4,3 +4,6 @@
 
 - Rust core: Unicode normalization (Uzbek apostrophes), PDF hyphenation repair, language/script detection.
 - Python: `Document` model, PyMuPDF-based PDF parser, `Parser` / `parse` API.
+- Structure detection: headings (numbering, font size, bold, capitals) and lists.
+- Structural chunker with heading paths, overlap and sentence/line/word fallbacks.
+- Rust: numbering detection, sentence splitting, token estimate.
