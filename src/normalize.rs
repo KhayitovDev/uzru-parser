@@ -4,7 +4,8 @@
 //! * NFC only (never NFKC): it keeps `ё`, `й`, Uzbek letters and ligature-free text intact.
 //! * `ё` is never turned into `е`.
 //! * Uzbek apostrophes are only rewritten when they sit *between two Latin letters*,
-//!   so quotes, Cyrillic text and standalone punctuation are left alone.
+//!   so quotes, Cyrillic text and standalone punctuation are left alone; English
+//!   possessives and contractions ("user’s", "don’t") keep theirs.
 //! * Table-of-contents dot leaders ("........") collapse to a single ellipsis.
 //!
 //! Order: symbol-font characters, then mixed-script words, then apostrophes, then spaces.
@@ -15,6 +16,7 @@ use unicode_normalization::{is_nfc, UnicodeNormalization};
 
 use crate::chars::is_apostrophe;
 use crate::confusables::fix_mixed_words;
+use crate::lexicon::is_known;
 use crate::symbols::{self, SymbolFont};
 
 /// Canonical Uzbek Latin modifier letters (Unicode recommendation).
@@ -109,6 +111,9 @@ fn uzbek_apostrophe(chars: &[char], i: usize) -> char {
         && i > 0
         && chars.get(i + 1).is_some_and(char::is_ascii_alphabetic)
         && chars[i - 1].is_ascii_alphabetic();
+    if between_latin_letters && english_apostrophe(chars, i) {
+        return c;
+    }
     match (
         between_latin_letters,
         chars[i.saturating_sub(1)].to_ascii_lowercase(),
@@ -117,6 +122,27 @@ fn uzbek_apostrophe(chars: &[char], i: usize) -> char {
         (true, 'o' | 'g') => TURNED_COMMA,
         (true, _) => APOSTROPHE,
     }
+}
+
+/// English possessives and contractions ("user’s", "don’t", "we’re") keep their apostrophe:
+/// the letters after it end the word and form an English ending, and the word is not Uzbek.
+fn english_apostrophe(chars: &[char], i: usize) -> bool {
+    let end = (i + 1..chars.len())
+        .find(|&j| !chars[j].is_alphabetic())
+        .unwrap_or(chars.len());
+    let tail: String = chars[i + 1..end]
+        .iter()
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    if !matches!(tail.as_str(), "s" | "t" | "re" | "ve" | "ll" | "d" | "m") {
+        return false;
+    }
+    let start = (0..i)
+        .rev()
+        .find(|&j| !is_word_char(chars[j]))
+        .map_or(0, |j| j + 1);
+    let word: String = chars[start..end].iter().collect();
+    !is_known(&word)
 }
 
 /// End index and dot count of a run of dots starting at `start`. Single spaces between
@@ -312,6 +338,20 @@ mod tests {
         assert_eq!(text, "TAʼLIM va valyuta");
         assert_eq!(stats.mixed_words, 3);
         assert_eq!(normalize_text("II-BОB"), "II-BOB");
+    }
+
+    #[test]
+    fn english_possessives_and_contractions_keep_their_apostrophe() {
+        for text in [
+            "the user’s funds",
+            "it isn’t free",
+            "we’re here",
+            "don't share",
+        ] {
+            assert_eq!(normalize_text(text), text);
+        }
+        assert_eq!(normalize_text("ta’m va ba’d"), "ta\u{02BC}m va ba\u{02BC}d");
+        assert_eq!(normalize_text("ma’lumot"), "ma\u{02BC}lumot");
     }
 
     #[test]

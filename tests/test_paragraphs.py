@@ -4,6 +4,7 @@ from uzru_parser.paragraphs import (
     build_paragraphs,
     figure_labels,
     figure_regions,
+    join_spread_lines,
     layout_stats,
     merge_row_fragments,
 )
@@ -206,3 +207,50 @@ def test_short_line_ending_a_sentence_still_ends_the_paragraph() -> None:
         line("Иванов начал новую главу", 100 + PITCH),
     ]
     assert len(texts(lines)) == 2
+
+
+def spread_row(words: list[tuple[str, float, float]], y: float) -> list[Line]:
+    return [line(word, y, x0=x0, x1=x1) for word, x0, x1 in words]
+
+
+def test_justified_line_stored_word_by_word_is_rebuilt() -> None:
+    row = spread_row(
+        [
+            ("desak", 72, 105),
+            ("Tadqiqotlar", 160, 230),
+            ("koʻp", 300, 340),
+            ("boʻlishiga", 420, 500),
+        ],
+        100 + PITCH,
+    )
+    lines = [
+        line("Agar biz, hozirgi kunda pul toʻgʻrisida yozilgan adabiyotlar", 100),
+        *row,
+        line(
+            "qaramasdan, pul va uning xususiyatlari haqida koʻp yozilgan.", 100 + 2 * PITCH, x1=400
+        ),
+    ]
+    assert texts(lines) == [
+        "Agar biz, hozirgi kunda pul toʻgʻrisida yozilgan adabiyotlar\n"
+        "desak Tadqiqotlar koʻp boʻlishiga\n"
+        "qaramasdan, pul va uning xususiyatlari haqida koʻp yozilgan."
+    ]
+
+
+def test_widely_spaced_labels_on_one_row_stay_apart() -> None:
+    labels = spread_row(
+        [("Risklar", 72, 130), ("Kredit", 260, 300), ("Foiz", 460, 500)], 100 + PITCH
+    )
+    lines = [line("Matn grafikdan oldin turibdi va davom etadi", 100), *labels]
+    assert join_spread_lines(lines, 500.0) == lines
+
+
+def test_row_pieces_that_do_not_fill_the_line_stay_apart() -> None:
+    cells = spread_row([("Ism:", 72, 100), ("Ali", 140, 170), ("Valiyev", 200, 260)], 100 + PITCH)
+    lines = [line("Matn jadvaldan oldin turibdi va davom etadi", 100), *cells]
+    assert join_spread_lines(lines, 500.0) == lines
+
+
+def test_spread_row_without_running_text_around_it_stays_apart() -> None:
+    row = spread_row([("Birinchi", 72, 140), ("Ikkinchi", 230, 300), ("Uchinchi", 430, 500)], 100)
+    assert join_spread_lines(row, 500.0) == row

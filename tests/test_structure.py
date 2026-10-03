@@ -711,3 +711,13 @@ def test_paragraph_continues_across_a_figure() -> None:
         "bosqichlarini oʻz ichiga oladi.",
         "Risklar | Kredit | Foiz",
     ]
+
+
+def test_one_word_loanword_follows_agreeing_neighbours() -> None:
+    raw = [plain(RUSSIAN), plain("Эквайринг"), plain(RUSSIAN)]
+    assert [b.language.language for b in build_blocks(raw)] == ["ru", "ru", "ru"]
+
+
+def test_one_word_loanword_between_disagreeing_neighbours_keeps_its_language() -> None:
+    raw = [plain(UZ_CYRILLIC), plain("Лизинг"), plain(RUSSIAN)]
+    assert build_blocks(raw)[1].language.language == "uz"
