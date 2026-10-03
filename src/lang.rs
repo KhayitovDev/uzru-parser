@@ -32,10 +32,13 @@ const UZ_WORDS: &str = "ва учун билан бу ёки ҳамда бўйи
     kabi haqida tomonidan umumiy xizmat respublikasi";
 
 /// Word endings that mark Uzbek Latin text (checked on words of at least `MIN_SUFFIX_WORD`).
-const UZ_SUFFIXES: &[&str] = &[
-    "lar", "ning", "dagi", "lik", "ishi", "ligi", "larni", "larga",
-];
+const UZ_SUFFIXES: &[&str] = &["dagi", "ligi", "lik", "larni", "larga", "lardan", "larning"];
 const MIN_SUFFIX_WORD: usize = 6;
+
+/// Below this share of marker words (in texts of at least `MIN_WORDS_FOR_COVERAGE` words)
+/// the markers are coincidences, e.g. a few Uzbek-looking words in English text.
+const MIN_COVERAGE: f64 = 0.05;
+const MIN_WORDS_FOR_COVERAGE: usize = 20;
 
 /// A Latin word that looks Uzbek: "q" not followed by "u" (qoida, huquq) or a typical ending.
 fn has_uzbek_shape(word: &str) -> bool {
@@ -203,7 +206,8 @@ pub fn detect(text: &str) -> Detection {
     }
 
     let voters = ru + uz;
-    if voters == 0 {
+    let sparse = words >= MIN_WORDS_FOR_COVERAGE && (voters as f64) < MIN_COVERAGE * words as f64;
+    if voters == 0 || sparse {
         // No markers: plain Cyrillic is most likely Russian, but with low confidence.
         return if script == "cyrillic" {
             Detection {
@@ -315,6 +319,14 @@ mod tests {
             assert_eq!(labels(text), ("uz", "latin"), "{text}");
         }
         assert_eq!(labels("Quality quote request").0, "unknown");
+    }
+
+    #[test]
+    fn english_text_is_not_labeled_uzbek() {
+        let english = "Circular imports and meaning reasoning about modules. \
+            Python uses reference counting for memory management, which is not thread-safe. \
+            Threads share memory and are lightweight, but are limited by the interpreter lock.";
+        assert_eq!(labels(english), ("unknown", "latin"));
     }
 
     #[test]

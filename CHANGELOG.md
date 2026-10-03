@@ -16,3 +16,4 @@
 - DOCX: paragraph styles are resolved once per style (about 4x faster on a 6-page FAQ).
 - Numbering: Uzbek order ("1-modda", "12-bob", "I BOʻLIM"), `§` sections, and legal hierarchy (part > chapter > paragraph > article); long article titles stay headings.
 - Language detection recognizes short Uzbek Latin phrases ("q" without "u", typical endings).
+- Language detection: removed English-prone Uzbek endings and ignore marker words that cover under 5% of a text.
