@@ -19,15 +19,12 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "maturin>=1.7,<2.0"]
+dev = ["ruff>=0.6", "mypy>=1.11", "maturin>=1.7,<2.0"]
 
 [tool.maturin]
 python-source = "python"
 module-name = "uzru_parser._core"
 features = ["pyo3/extension-module"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100

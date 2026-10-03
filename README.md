@@ -19,9 +19,8 @@ print(chunks[0].heading_path, chunks[0].page_start, chunks[0].text[:80])
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install maturin pytest ruff mypy pymupdf
+pip install maturin ruff mypy pymupdf
 maturin develop --release
-pytest
 cargo test
 ```
 
