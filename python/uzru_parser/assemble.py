@@ -31,6 +31,12 @@ def assemble_document(
 ) -> Document:
     for block in blocks:
         pages[block.page - 1].block_count += 1
+    sources = Counter(
+        str(block.extra.get("heading_source", "unknown"))
+        for block in blocks
+        if block.type is BlockType.HEADING
+    )
+    extra = {**(extra or {}), "heading_sources": dict(sources)}
     document = Document(
         metadata=DocumentMetadata(
             source=str(path),
@@ -38,7 +44,7 @@ def assemble_document(
             title=title or None,
             author=author or None,
             page_count=len(pages),
-            extra=extra or {},
+            extra=extra,
         ),
         pages=pages,
         blocks=blocks,

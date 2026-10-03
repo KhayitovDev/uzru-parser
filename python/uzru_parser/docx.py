@@ -15,6 +15,7 @@ from docx.text.paragraph import Paragraph
 from .assemble import assemble_document
 from .models import Document, Page
 from .structure import RawBlock, build_blocks
+from .text import CleanStats, compound_pairs
 
 BULLET = "• "
 HEADING_STYLE_ID = re.compile(r"Heading(\d)")
@@ -44,14 +45,16 @@ def parse_docx(path: str | Path) -> Document:
     last_page = max(page, 1)
     pages = [Page(number=number) for number in range(1, last_page + 1)]
     properties = docx.core_properties
+    stats = CleanStats()
+    compounds = compound_pairs(raw.text for raw in raw_blocks)
     return assemble_document(
         path,
         "docx",
         pages,
-        build_blocks(raw_blocks),
+        build_blocks(raw_blocks, compounds=compounds, stats=stats),
         title=properties.title,
         author=properties.author,
-        extra={"pages_approximate": True},
+        extra={"pages_approximate": True, **stats.as_dict()},
     )
 
 

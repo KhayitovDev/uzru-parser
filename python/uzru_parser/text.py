@@ -2,18 +2,80 @@
 
 from __future__ import annotations
 
-from . import _core
+import re
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass
+
+from . import _core, config
 from .models import LanguageInfo
+
+_core.set_heading_keywords(list(config.HEADING_KEYWORDS))
+
+_COMPOUND = re.compile(r"[^\W\d_]+(?:-[^\W\d_]+)+")
+
+
+@dataclass
+class CleanStats:
+    """What character cleanup changed in one document."""
+
+    mixed_script_words_fixed: int = 0
+    symbol_chars_mapped: int = 0
+    symbol_chars_removed: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return asdict(self)
+
+    def add(self, other: CleanStats) -> None:
+        self.mixed_script_words_fixed += other.mixed_script_words_fixed
+        self.symbol_chars_mapped += other.symbol_chars_mapped
+        self.symbol_chars_removed += other.symbol_chars_removed
 
 
 def normalize(text: str) -> str:
-    """NFC + invisible-char cleanup + Uzbek apostrophe normalization + whitespace."""
+    """Symbol fonts, look-alike letters, apostrophes, spaces (see ``clean`` for counts)."""
     return _core.normalize_text(text)
+
+
+def clean(text: str, stats: CleanStats | None = None) -> str:
+    """``normalize`` that adds what it fixed to ``stats``."""
+    out, mixed, mapped, removed = _core.normalize_text_stats(text)
+    if stats is not None:
+        stats.mixed_script_words_fixed += mixed
+        stats.symbol_chars_mapped += mapped
+        stats.symbol_chars_removed += removed
+    return out
+
+
+def map_symbol_font(text: str, font_name: str, stats: CleanStats | None = None) -> str:
+    """Translate symbol-font characters of a span whose font is Symbol- or Wingdings-like."""
+    out, mapped, removed = _core.map_symbol_font(text, font_name)
+    if stats is not None:
+        stats.symbol_chars_mapped += mapped
+        stats.symbol_chars_removed += removed
+    return out
 
 
 def repair_hyphenation(text: str) -> str:
     """Join words wrapped with a hyphen at line end; keep real hyphenated words."""
     return _core.repair_hyphenation(text)
+
+
+Hyphenator = _core.Hyphenator
+
+
+def compound_pairs(texts: Iterable[str]) -> set[str]:
+    """Lowercase "left-right" pairs of the hyphenated words written in one piece in ``texts``.
+
+    A hyphen at a line break is kept when the same document writes that compound whole.
+    """
+    pairs: set[str] = set()
+    for text in texts:
+        if "-" not in text:
+            continue
+        for compound in _COMPOUND.findall(text):
+            parts = compound.lower().split("-")
+            pairs.update(f"{a}-{b}" for a, b in zip(parts, parts[1:], strict=False))
+    return pairs
 
 
 def detect_language(text: str) -> LanguageInfo:

@@ -1,5 +1,7 @@
+import pytest
 from uzru_parser.layout import mark_footnotes, mark_title_page, mark_toc, strip_page_furniture
 from uzru_parser.structure import RawBlock
+from uzru_parser.text import clean
 
 HEIGHTS = {1: 800.0, 2: 800.0, 3: 800.0}
 
@@ -89,11 +91,12 @@ def test_contents_pages_are_marked_and_back_matter_follows() -> None:
         page_block("1-MAVZU: KIRISH. (BANK ISHI VA MOLIYA ASOSLARI FANINING", 236, 110),
         page_block("PREDMETI). 1.1. Banklarning paydo boʻlish sabablari ……… 3", 236, 140),
         page_block("1.2. Pulning mohiyati va namoyon boʻlish shakllari ……… 6", 236, 170),
+        page_block("1.3. Fanning boshqa fanlar bilan aloqasi ……… 13", 236, 200),
         page_block("2-MAVZU: PUL VA BANK ISHI ………… 17", 237, 100),
     ]
     blocks += [page_block("NASHRIYOT-MATBAA UYI. Bosishga ruxsat etildi.", 239, 100)]
     mark_toc(blocks, page_count=240)
-    assert [b.role for b in blocks] == [None, "toc", "toc", "toc", "toc", "toc", "back_matter"]
+    assert [b.role for b in blocks] == [None] + ["toc"] * 6 + ["back_matter"]
 
 
 def test_leader_lines_without_a_title_are_still_a_contents() -> None:
@@ -138,3 +141,92 @@ def test_page_numbers_in_a_separate_column_belong_to_the_contents() -> None:
     ]
     mark_toc(blocks, page_count=240)
     assert [b.role for b in blocks] == ["toc"] * 9 + ["back_matter"]
+
+
+# --- Contents found by shape (section 7), glued footnote numbers (section 8) ---------------
+
+
+def entries(page: int, titles: list[str], first_number: int, y: float = 100) -> list[RawBlock]:
+    return [
+        page_block(f"{title} {first_number + 4 * i}", page, y + 20 * i)
+        for i, title in enumerate(titles)
+    ]
+
+
+TITLES = ["1.1. Banklarning turlari", "1.2. Markaziy bank", "1.3. Tijorat banklari", "1.4. Kredit"]
+
+
+def test_contents_without_leaders_or_title_is_found_by_shape() -> None:
+    blocks = [
+        page_block("Kirish matni.", 2, 100),
+        *entries(3, TITLES, 5),
+        page_block("Matn.", 5, 100),
+    ]
+    mark_toc(blocks, page_count=200)
+    assert [b.role for b in blocks] == [None, "toc", "toc", "toc", "toc", None]
+
+
+def test_contents_title_with_hidden_cyrillic_letters_is_recognised() -> None:
+    title = page_block(clean("MUNDАRIJА"), 120, 80)
+    blocks = [title, *entries(120, TITLES, 5)]
+    mark_toc(blocks, page_count=200)
+    assert title.text == "MUNDARIJA"
+    assert all(b.role == "toc" for b in blocks)
+
+
+def test_every_contents_page_is_marked() -> None:
+    blocks = [
+        page_block("Oldingi bob matni.", 2, 100),
+        page_block("MUNDARIJA", 3, 80),
+        *entries(3, TITLES, 5),
+        *entries(4, ["2.1. Valyuta", "2.2. Kurs", "2.3. Bozor"], 40),
+        *entries(5, ["3.1. Soliq"], 90),
+        page_block("1-BOB. KIRISH", 6, 100),
+    ]
+    mark_toc(blocks, page_count=200)
+    assert [b.role for b in blocks] == [None] + ["toc"] * 9 + [None]
+
+
+def test_lines_ending_in_numbers_inside_the_book_are_not_contents() -> None:
+    blocks = [
+        page_block("Bank 2020-yilda tashkil etilgan 5", 90, 100),
+        page_block("Uning filiallari soni oshib 12", 90, 120),
+        page_block("Mijozlar soni esa yana 30", 90, 140),
+    ]
+    mark_toc(blocks, page_count=200)
+    assert all(b.role is None for b in blocks)
+
+
+def test_falling_numbers_are_not_contents() -> None:
+    values = [("A", 90), ("B", 70), ("C", 50), ("D", 30)]
+    blocks = [
+        page_block(f"Koʻrsatkich {n} {v}", 2, 100 + 20 * i) for i, (n, v) in enumerate(values)
+    ]
+    mark_toc(blocks, page_count=200)
+    assert all(b.role is None for b in blocks)
+
+
+@pytest.mark.parametrize(
+    "text", ["1И. Каримов. Ўзбекистон мустақилликка эришиш остонасида", "22 Банковское дело"]
+)
+def test_footnote_number_may_be_glued_to_the_text(text: str) -> None:
+    note = page_block(text, 2, 760, size=8)
+    mark_footnotes([note], {2: 842.0}, 11.0)
+    assert note.footnote
+
+
+def test_numbers_that_are_values_are_not_footnotes() -> None:
+    value = page_block("1990-yilda qabul qilingan", 2, 760, size=8)
+    mark_footnotes([value], {2: 842.0}, 11.0)
+    assert not value.footnote
+
+
+def test_contents_with_titles_wrapping_over_several_lines() -> None:
+    wrapped = [
+        page_block("1.1. Banklarning\npaydo\nboʻlish\nsabablari … 3", 236, 100),
+        page_block("1.2. Banklarning mohiyati va uning\nnamoyon boʻlish shakllari … 6", 236, 160),
+        page_block("1.3. Fanning boshqa iqtisodiy fanlar\nbilan aloqadorligi … 13", 236, 220),
+    ]
+    blocks = [page_block("MUNDARIJA", 236, 80), *wrapped]
+    mark_toc(blocks, page_count=240)
+    assert all(b.role == "toc" for b in blocks)

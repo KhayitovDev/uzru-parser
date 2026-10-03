@@ -1,6 +1,6 @@
 import pytest
 from uzru_parser import BlockType
-from uzru_parser.structure import RawBlock, build_blocks
+from uzru_parser.structure import OutlineEntry, RawBlock, build_blocks
 from uzru_parser.text import numbering_info, split_sentences
 
 
@@ -16,38 +16,106 @@ PARAGRAPH = "Настоящий договор является основани
 
 
 @pytest.mark.parametrize(
-    ("text", "level"),
+    "text",
     [
-        ("1. ОБЩИЕ ПОЛОЖЕНИЯ", 1),
-        ("1.1. Основные понятия", 2),
-        ("Статья 5. Права сторон", 4),
-        ("1. UMUMIY QOIDALAR", 1),
-        ("1.1. Asosiy tushunchalar", 2),
-        ("2. XIZMAT KO‘RSATISH TARTIBI", 1),
-        ("1. УМУМИЙ ҚОИДАЛАР", 1),
-        ("1.2. Асосий тушунчалар", 2),
-        ("МОДДА 4. ҲУҚУҚЛАР ВА МАЖБУРИЯТЛАР", 4),
-        ("1-modda. Ushbu Kodeks bilan tartibga solinadigan munosabatlar", 4),
-        ("1-bob. Asosiy qoidalar", 2),
-        ("I BOʻLIM. UMUMIY QOIDALAR", 1),
-        ("1-§. Yakka tartibdagi munosabatlar", 3),
-        ("ПРИЛОЖЕНИЕ № 1", 1),
-        ("I. Общие положения", 1),
+        "1.1. Основные понятия",
+        "Статья 5. Права сторон",
+        "1.1. Asosiy tushunchalar",
+        "1.2. Асосий тушунчалар",
+        "МОДДА 4. ҲУҚУҚЛАР ВА МАЖБУРИЯТЛАР",
+        "1-modda. Ushbu Kodeks bilan tartibga solinadigan munosabatlar",
+        "1-bob. Asosiy qoidalar",
+        "I BOʻLIM. UMUMIY QOIDALAR",
+        "1-§. Yakka tartibdagi munosabatlar",
+        "ПРИЛОЖЕНИЕ № 1",
+        "I-BOB. PUL VA KREDIT",
     ],
 )
-def test_headings_with_font_signals(text: str, level: int) -> None:
+def test_headings_with_font_signals(text: str) -> None:
     blocks = build_blocks([body(PARAGRAPH), heading(text), body(PARAGRAPH)])
     assert [b.type for b in blocks] == [
         BlockType.PARAGRAPH,
         BlockType.HEADING,
         BlockType.PARAGRAPH,
     ]
-    assert blocks[1].level == level
+    assert blocks[1].level == 1  # the only kind of heading in the document is its top level
 
 
-def test_uppercase_numbered_heading_without_font_info() -> None:
-    raw = [RawBlock(text="1. ОБЩИЕ ПОЛОЖЕНИЯ", page=1), RawBlock(text=PARAGRAPH, page=1)]
-    assert [b.type for b in build_blocks(raw)] == [BlockType.HEADING, BlockType.PARAGRAPH]
+@pytest.mark.parametrize(
+    ("texts", "expected"),
+    [
+        (
+            ["I-BOB. PUL", "1.1. Pul tushunchasi", "1.1.1. Pulning turlari", "II-BOB. KREDIT"],
+            [1, 2, 3, 1],
+        ),
+        (["3-MAVZU: BANK", "3.1. Banklarning turlari", "4-MAVZU: RISKLAR"], [1, 2, 1]),
+        (
+            ["I BOʻLIM. UMUMIY", "1-bob. Asosiy", "1-§. Yakka", "1-modda. Munosabatlar"],
+            [1, 2, 3, 4],
+        ),
+        (["Глава 1. Общие", "1.1. Понятия", "1.1.1. Термины", "Глава 2. Права"], [1, 2, 3, 1]),
+    ],
+)
+def test_levels_follow_the_heading_kinds_present(texts: list[str], expected: list[int]) -> None:
+    raw = [part for text in texts for part in (heading(text), body(PARAGRAPH))]
+    assert [b.level for b in build_blocks(raw) if b.type is BlockType.HEADING] == expected
+
+
+def test_chapter_is_never_below_its_subsection() -> None:
+    raw = [
+        heading("1.1. Pul tushunchasi", size=14, bold=1.0),
+        body(PARAGRAPH),
+        heading("II-BOB. KREDIT", size=12, bold=1.0),
+        body(PARAGRAPH),
+        heading("2.1. Kredit turlari", size=14, bold=1.0),
+        body(PARAGRAPH),
+    ]
+    levels = {b.text: b.level for b in build_blocks(raw) if b.type is BlockType.HEADING}
+    assert levels["II-BOB. KREDIT"] < levels["2.1. Kredit turlari"]
+
+
+def test_numbered_headings_in_a_sequence_with_text_between() -> None:
+    raw = [
+        RawBlock(text="1. ОБЩИЕ ПОЛОЖЕНИЯ", page=1),
+        RawBlock(text=PARAGRAPH, page=1),
+        RawBlock(text="2. ПРЕДМЕТ ДОГОВОРА", page=1),
+        RawBlock(text=PARAGRAPH, page=1),
+    ]
+    assert [b.type for b in build_blocks(raw)] == [
+        BlockType.HEADING,
+        BlockType.PARAGRAPH,
+        BlockType.HEADING,
+        BlockType.PARAGRAPH,
+    ]
+
+
+def test_lone_numbered_item_is_a_list_item_not_a_heading() -> None:
+    raw = [body(PARAGRAPH), RawBlock(text="4. Pul muomalasi qonuni", page=1, font_size=11, bold=1)]
+    assert block_types(raw) == [BlockType.PARAGRAPH, BlockType.LIST]
+
+
+def test_consecutive_numbered_items_are_a_list() -> None:
+    raw = [
+        body(PARAGRAPH),
+        RawBlock(text="1. Birinchi talab", page=1, font_size=11, bold=1),
+        RawBlock(text="2. Ikkinchi talab", page=1, font_size=11, bold=1),
+    ]
+    blocks = build_blocks(raw)
+    assert [b.type for b in blocks] == [BlockType.PARAGRAPH, BlockType.LIST]
+    assert blocks[1].extra["items"] == ["1. Birinchi talab", "2. Ikkinchi talab"]
+
+
+@pytest.mark.parametrize("label", ["B", "Sˆ", "0 = p", "MV=PY", "x + y", "12.5 %"])
+def test_labels_and_formulas_are_never_headings(label: str) -> None:
+    raw = [body(PARAGRAPH), RawBlock(text=label, page=1, font_size=16, bold=1.0, spaced=True)]
+    assert BlockType.HEADING not in block_types(raw)
+
+
+def test_one_signal_is_not_enough() -> None:
+    bigger_only = RawBlock(text="Pul va kredit tizimi", page=1, font_size=16)
+    bigger_and_bold = RawBlock(text="Pul va kredit tizimi", page=1, font_size=16, bold=1.0)
+    assert block_types([body(PARAGRAPH), bigger_only])[1] is BlockType.PARAGRAPH
+    assert block_types([body(PARAGRAPH), bigger_and_bold])[1] is BlockType.HEADING
 
 
 def test_numbered_clause_is_paragraph() -> None:
@@ -162,7 +230,7 @@ def test_heading_continuation_must_match_style_and_stay_close() -> None:
     smaller = RawBlock(text="IZOH", page=1, bbox=(0, 122, 300, 135), font_size=9, bold=0)
     assert headings(near) == ["2-MAVZU: PUL VA BANK ISHI VA NAZARIYA"]
     assert headings(far) == ["2-MAVZU: PUL VA BANK ISHI", "KEYINGI BOʻLIM"]
-    assert headings(smaller) == ["2-MAVZU: PUL VA BANK ISHI", "IZOH"]
+    assert headings(smaller) == ["2-MAVZU: PUL VA BANK ISHI"]  # one signal only: a paragraph
 
 
 def test_numbered_title_inside_a_body_block_is_split_off() -> None:
@@ -173,7 +241,8 @@ def test_numbered_title_inside_a_body_block_is_split_off() -> None:
     )
     blocks = build_blocks([body(PARAGRAPH), RawBlock(text=text, page=3, font_size=11)])
     assert [b.type for b in blocks] == [BlockType.PARAGRAPH, BlockType.HEADING, BlockType.PARAGRAPH]
-    assert (blocks[1].text, blocks[1].level) == ("1.1. Banklarning paydo boʻlish sabablari", 2)
+    assert blocks[1].text == "1.1. Banklarning paydo boʻlish sabablari"
+    assert blocks[1].extra["heading_source"] == "numbering"
 
 
 def test_wrapped_numbered_title_inside_a_body_block_is_split_off() -> None:
@@ -289,10 +358,9 @@ def test_numbered_list_item_lines_are_not_split_into_a_title() -> None:
     text = (
         "1. Kalendar ketma-ketlik\nUshbu bosqichda barcha harakatlar kalendar tartibida bajariladi."
     )
-    assert block_types([body(PARAGRAPH), RawBlock(text=text, page=19, font_size=11)]) == [
-        BlockType.PARAGRAPH,
-        BlockType.PARAGRAPH,
-    ]
+    blocks = build_blocks([body(PARAGRAPH), RawBlock(text=text, page=19, font_size=11)])
+    assert [b.type for b in blocks] == [BlockType.PARAGRAPH, BlockType.LIST]
+    assert len(blocks[1].extra["items"]) == 1
 
 
 def test_continued_plan_items_in_one_block_are_not_split_into_a_title() -> None:
@@ -340,7 +408,7 @@ def test_numbered_title_set_apart_by_blank_lines_is_a_heading() -> None:
     )
     blocks = build_blocks([body(PARAGRAPH), RawBlock(text=text, page=3, font_size=11)])
     assert [b.type for b in blocks] == [BlockType.PARAGRAPH, BlockType.HEADING, BlockType.PARAGRAPH]
-    assert blocks[1].level == 2
+    assert blocks[1].text == "1.1. Banklarning paydo boʻlish sabablari"
 
 
 def test_numbered_plan_item_set_apart_by_blank_lines_is_not_a_heading() -> None:
@@ -357,3 +425,96 @@ def test_capitals_with_mostly_digits_are_not_headings(text: str) -> None:
     assert block_types([body(PARAGRAPH), RawBlock(text=text, page=2, font_size=11)])[1] is (
         BlockType.PARAGRAPH
     )
+
+
+# --- Bookmarks and contents confirm headings (section 6) ------------------------------------
+
+
+def plain(text: str, page: int = 1) -> RawBlock:
+    return RawBlock(text=text, page=page, font_size=11.0)
+
+
+def test_bookmarks_make_headings_and_give_their_levels() -> None:
+    outline = [OutlineEntry(1, "KIRISH", 1), OutlineEntry(2, "Banklarning turlari", 2)]
+    raw = [
+        plain("Kirish", 1),
+        plain(PARAGRAPH, 1),
+        plain("Banklarning turlari", 2),
+        plain(PARAGRAPH, 2),
+    ]
+    blocks = build_blocks(raw, outline=outline)
+    headings = [
+        (b.text, b.level, b.extra["heading_source"]) for b in blocks if b.type is BlockType.HEADING
+    ]
+    assert headings == [("Kirish", 1, "bookmarks"), ("Banklarning turlari", 2, "bookmarks")]
+
+
+def test_bookmark_title_glued_to_its_text_is_split_off() -> None:
+    outline = [OutlineEntry(1, "Banklarning turlari", 2)]
+    raw = [plain("Banklarning turlari\nPul – mahsulot va tovarlar ishlab chiqarish vositasi.", 2)]
+    blocks = build_blocks(raw, outline=outline)
+    assert [b.type for b in blocks] == [BlockType.HEADING, BlockType.PARAGRAPH]
+
+
+def test_bookmark_on_a_distant_page_does_not_match() -> None:
+    outline = [OutlineEntry(1, "Kirish", 50)]
+    assert BlockType.HEADING not in [
+        b.type for b in build_blocks([plain("Kirish", 2)], outline=outline)
+    ]
+
+
+def test_contents_entries_confirm_headings_without_bookmarks() -> None:
+    toc = RawBlock(text="KIRISH … 3\nXULOSA … 230", page=2, role="toc")
+    raw = [toc, plain("Kirish", 3), plain(PARAGRAPH, 3), plain("4. Ushbu band oddiy roʻyxat", 4)]
+    blocks = build_blocks(raw)
+    assert [(b.type, b.extra.get("heading_source")) for b in blocks[1:]] == [
+        (BlockType.HEADING, "contents"),
+        (BlockType.PARAGRAPH, None),
+        (BlockType.LIST, None),
+    ]
+
+
+# --- Footnotes, tables, language (sections 8-10) --------------------------------------------
+
+
+def test_footnote_number_glued_to_cyrillic_is_split_from_the_text() -> None:
+    note = RawBlock(text="1И. Каримов. Ўзбекистон мустақилликка", page=3, footnote=True)
+    block = build_blocks([note])[0]
+    assert (block.extra["number"], block.text) == ("1", "И. Каримов. Ўзбекистон мустақилликка")
+
+
+def test_header_split_over_two_rows_is_merged() -> None:
+    rows = [["Ish", "Natija", "Muddat"], ["bosqichlari", "", ""], ["Rejalash", "Reja", "1 oy"]]
+    block = build_blocks([RawBlock(text="", page=1, rows=rows)])[0]
+    assert block.extra["rows"][0] == ["Ish bosqichlari", "Natija", "Muddat"]
+    assert len(block.extra["rows"]) == 2
+
+
+def test_lowercase_data_rows_are_not_merged_into_the_header() -> None:
+    rows = [["Xizmat", "Operatsiya"], ["kredit", "berish"], ["omonat", "qabul"]]
+    assert build_blocks([RawBlock(text="", page=1, rows=rows)])[0].extra["rows"] == rows
+
+
+def test_repeated_merged_header_cells_are_kept_once() -> None:
+    rows = [["Harakatlar", "Yakka", "Yakka", "Guruh"], ["Tahlil", "1", "2", "3"]]
+    block = build_blocks([RawBlock(text="", page=1, rows=rows)])[0]
+    assert block.extra["rows"][0] == ["Harakatlar", "Yakka", "", "Guruh"]
+    assert block.extra["rows"][1] == ["Tahlil", "1", "2", "3"]
+
+
+def test_short_blocks_take_their_neighbours_language() -> None:
+    raw = [
+        plain("Ushbu qoidalar xizmat koʻrsatish tartibini va uchun belgilaydi."),
+        plain("Reja:"),
+        plain("12.5"),
+    ]
+    blocks = build_blocks(raw)
+    assert [b.language.language for b in blocks] == ["uz", "uz", "uz"]
+
+
+def test_long_unknown_blocks_keep_their_own_language() -> None:
+    raw = [
+        plain("Ushbu qoidalar xizmat koʻrsatish tartibini va uchun belgilaydi."),
+        plain("Python uses reference counting for memory management in CPython."),
+    ]
+    assert build_blocks(raw)[1].language.language == "unknown"

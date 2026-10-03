@@ -1,61 +1,66 @@
-"""PDF extraction with PyMuPDF."""
+"""PDF extraction with PyMuPDF.
+
+Order of work: characters are cleaned per span and line (symbol fonts, look-alike letters,
+apostrophes, spaces), lines are rebuilt into paragraphs, hyphens are rejoined, page
+furniture / footnotes / title page / contents are marked, then headings, language and
+blocks are built.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import functools
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pymupdf
 
+from . import config
 from .assemble import assemble_document
 from .layout import mark_footnotes, mark_title_page, mark_toc, strip_page_furniture
 from .models import Document, Page
-from .structure import RawBlock, body_font_size, build_blocks
-
-BBox = tuple[float, float, float, float]
+from .paragraphs import BBox, Line, build_paragraphs, figure_regions, layout_stats
+from .structure import OutlineEntry, RawBlock, build_blocks
+from .text import CleanStats, Hyphenator, clean, compound_pairs, map_symbol_font
 
 PYMUPDF_BOLD_FLAG = 16
 PYMUPDF_SUPERSCRIPT_FLAG = 1
 IMAGE_BLOCK = 1
 MIN_TEXT_CHARS = 25
-MIN_TABLE_ROWS = 2
-MIN_TABLE_COLUMNS = 2
-MIN_RULING_PATHS = 4
-MIN_MULTI_CELL_ROWS = 0.3
 SYMBOL_FONTS = ("symbol", "wingding", "webding", "dingbats")
-PRIVATE_USE = range(0xE000, 0xF900)
 MAX_MARK_CHARS = 3
 MARK_SIZE_RATIO = 0.8
 MARK_RAISE_RATIO = 0.15
-BOLD_SHARE = 0.6
+_PRIVATE_USE = re.compile("[\ue000-\uf8ff]")
+_ONLY_PRIVATE_USE = re.compile(r"\s*[\ue000-\uf8ff]+\s*")
+_SENTENCE_END = re.compile(r"[.!?:…;]\s*$")
 
 
 @dataclass
 class _PageContent:
-    blocks: list[RawBlock] = field(default_factory=list)
-    needs_ocr: bool = False
-
-
-@dataclass
-class _Line:
-    text: str
-    size: float | None
-    bold: float
-    chars: int
-    bbox: BBox
-    refs: list[str]
+    number: int
+    lines: list[Line]
+    tables: list[RawBlock]
+    drawings: list[BBox]  # vector drawings and images, grouped into figures later
+    page_box: BBox
+    needs_ocr: bool
 
 
 def parse_pdf(path: str | Path, detect_tables: bool = True) -> Document:
     path = Path(path)
+    stats = CleanStats()
     pages: list[Page] = []
-    raw_blocks: list[RawBlock] = []
+    contents: list[_PageContent] = []
 
     with pymupdf.open(path) as pdf:  # type: ignore[no-untyped-call]
         meta = pdf.metadata or {}
+        outline = [
+            OutlineEntry(level=entry[0], title=clean(entry[1]), page=entry[2])
+            for entry in pdf.get_toc(simple=True)
+        ]
         for number, page in enumerate(pdf, start=1):
-            content = _extract_page(page, number, detect_tables)
+            content = _read_page(page, number, detect_tables, stats)
             pages.append(
                 Page(
                     number=number,
@@ -64,48 +69,101 @@ def parse_pdf(path: str | Path, detect_tables: bool = True) -> Document:
                     needs_ocr=content.needs_ocr,
                 )
             )
-            raw_blocks.extend(content.blocks)
+            contents.append(content)
+
+    layout = layout_stats([content.lines for content in contents])
+    compounds = compound_pairs(line.text for content in contents for line in content.lines)
+    hyphenator = Hyphenator(sorted(compounds))
+    raw_blocks: list[RawBlock] = []
+    for content in contents:
+        regions = figure_regions(content.drawings, content.page_box, layout.body_size)
+        blocks = build_paragraphs(content.lines, content.number, layout, regions)
+        for block in blocks:
+            block.text = hyphenator.repair(block.text)
+        raw_blocks.extend(_merge_tables(blocks, content.tables))
 
     heights = {page.number: page.height for page in pages}
     raw_blocks, removed = strip_page_furniture(raw_blocks, heights)
-    mark_footnotes(raw_blocks, heights, body_font_size(raw_blocks))
+    mark_footnotes(raw_blocks, heights, layout.body_size)
     mark_title_page(raw_blocks, len(pages))
     mark_toc(raw_blocks, len(pages))
+    document_blocks = build_blocks(
+        raw_blocks, outline=outline, compounds=compounds, stats=stats, text_is_clean=True
+    )
     return assemble_document(
         path,
         "pdf",
         pages,
-        build_blocks(raw_blocks),
+        document_blocks,
         title=meta.get("title"),
         author=meta.get("author"),
-        extra={"removed_page_furniture": removed},
+        extra={"removed_page_furniture": removed, **stats.as_dict()},
     )
 
 
-def _extract_page(page: pymupdf.Page, number: int, detect_tables: bool) -> _PageContent:
-    tables = _find_tables(page, number) if detect_tables else []
+def _read_page(
+    page: pymupdf.Page, number: int, detect_tables: bool, stats: CleanStats
+) -> _PageContent:
+    drawings = page.get_cdrawings()  # type: ignore[no-untyped-call]
+    tables = _find_tables(page, number, len(drawings)) if detect_tables else []
     page_dict = page.get_text("dict", sort=True)  # type: ignore[no-untyped-call]
-    blocks: list[RawBlock] = []
-    has_images = False
+    lines: list[Line] = []
+    images: list[BBox] = []
     chars = 0
 
-    for block in page_dict["blocks"]:
+    for block_number, block in enumerate(page_dict["blocks"]):
         if block["type"] == IMAGE_BLOCK:
-            has_images = True
+            images.append(tuple(block["bbox"]))
             continue
-        for raw in _text_blocks(block, number):
-            chars += len(raw.text.strip())
-            if not any(_inside(raw.bbox, table.bbox) for table in tables):
-                blocks.append(raw)
+        block_lines = [_line(raw, block_number, stats, clean_text=False) for raw in block["lines"]]
+        block_lines = [line for line in block_lines if line.text.strip()]
+        _clean_lines(block_lines, stats)
+        for line in block_lines:
+            if not line.text.strip():
+                continue
+            chars += line.chars
+            if not any(_inside(line.bbox, table.bbox) for table in tables):
+                lines.append(line)
 
-    blocks = _merge_tables(blocks, tables)
-    return _PageContent(blocks, needs_ocr=has_images and chars < MIN_TEXT_CHARS)
+    return _PageContent(
+        number=number,
+        lines=lines,
+        tables=tables,
+        drawings=[tuple(d["rect"]) for d in drawings] + images,
+        page_box=tuple(page.rect),
+        needs_ocr=bool(images) and chars < MIN_TEXT_CHARS,
+    )
+
+
+def _clean_lines(lines: list[Line], stats: CleanStats) -> None:
+    """Clean the text of one block's lines with a single call; per line only when a line
+    vanishes in cleaning and the lines no longer line up."""
+    if not lines:
+        return
+    batch = CleanStats()
+    parts = clean("\n".join(line.text for line in lines), batch).split("\n")
+    if len(parts) == len(lines):
+        stats.add(batch)
+        for line, part in zip(lines, parts, strict=True):
+            line.text = part
+        return
+    for line in lines:
+        line.text = clean(line.text, stats)
+
+
+@functools.lru_cache(maxsize=256)
+def _symbol_font(font: str) -> bool:
+    name = font.lower()
+    return any(symbol in name for symbol in SYMBOL_FONTS)
+
+
+@functools.lru_cache(maxsize=256)
+def _bold_font(font: str) -> bool:
+    return "bold" in font.lower()
 
 
 def _is_symbol_span(span: dict[str, Any]) -> bool:
-    text = span["text"].strip()
-    private = bool(text) and all(ord(c) in PRIVATE_USE for c in text)
-    return private or any(name in span["font"].lower() for name in SYMBOL_FONTS)
+    return _symbol_font(span["font"]) or bool(_ONLY_PRIVATE_USE.fullmatch(span["text"]))
 
 
 def _is_reference_mark(
@@ -124,98 +182,76 @@ def _is_reference_mark(
     return bool(small and raised)
 
 
-def _line(raw_line: dict[str, Any]) -> _Line:
+def _line(
+    raw_line: dict[str, Any], block_number: int, stats: CleanStats, clean_text: bool = True
+) -> Line:
+    """One printed line with cleaned text, its style and its footnote reference marks."""
     spans = raw_line["spans"]
-    plain = [s for s in spans if not _is_symbol_span(s) and s["text"].strip()]
-    line_size = max((s["size"] for s in plain), default=None)
+    symbol = [_is_symbol_span(s) for s in spans]
+    line_size = max(
+        (s["size"] for s, sym in zip(spans, symbol, strict=True) if not sym and s["text"].strip()),
+        default=None,
+    )
     baseline = max((s["origin"][1] for s in spans), default=0.0)
 
     kept: list[str] = []
+    original: list[str] = []
     refs: list[str] = []
     sizes: list[float] = []
     chars = bold_chars = 0
-    for span in spans:
+    for span, is_symbol in zip(spans, symbol, strict=True):
+        original.append(span["text"])
         if _is_reference_mark(span, kept, line_size, baseline):
             refs.append(span["text"].strip())
             continue
-        kept.append(span["text"])
-        if _is_symbol_span(span):
+        text = span["text"]
+        if _PRIVATE_USE.search(text):
+            text = map_symbol_font(text, span["font"], stats)
+        kept.append(text)
+        if is_symbol:
             continue
         length = len(span["text"].strip())
         chars += length
         if length:
             sizes.append(span["size"])
-        if span["flags"] & PYMUPDF_BOLD_FLAG or "bold" in span["font"].lower():
+        if span["flags"] & PYMUPDF_BOLD_FLAG or _bold_font(span["font"]):
             bold_chars += length
-    return _Line(
-        text="".join(kept),
+    text = "".join(kept)
+    return Line(
+        text=clean(text, stats) if clean_text else text,
+        bbox=tuple(raw_line["bbox"]),
         size=max(sizes, default=None),
         bold=bold_chars / chars if chars else 0.0,
         chars=chars,
-        bbox=tuple(raw_line["bbox"]),
+        original="".join(original),
         refs=refs,
-    )
-
-
-def _style(line: _Line) -> tuple[float, bool]:
-    return round((line.size or 0.0) * 2) / 2, line.bold >= BOLD_SHARE
-
-
-def _text_blocks(block: dict[str, Any], number: int) -> list[RawBlock]:
-    """One raw block per run of lines with the same font size and boldness.
-
-    PDF producers often put a title and the text below it into one block; splitting on a
-    style change keeps the title separate.
-    """
-    groups: list[list[_Line]] = []
-    styles: list[tuple[float, bool]] = []
-    for line in map(_line, block["lines"]):
-        if not line.text.strip():
-            continue
-        if line.chars == 0 and groups:  # e.g. a lone bullet glyph: stays with its neighbours
-            groups[-1].append(line)
-        elif groups and styles[-1] == _style(line):
-            groups[-1].append(line)
-        else:
-            groups.append([line])
-            styles.append(_style(line))
-    return [_raw_block(group, number) for group in groups if any(line.chars for line in group)]
-
-
-def _raw_block(lines: list[_Line], number: int) -> RawBlock:
-    chars = sum(line.chars for line in lines)
-    boxes = [line.bbox for line in lines]
-    return RawBlock(
-        text="\n".join(line.text for line in lines),
-        page=number,
-        bbox=(
-            min(b[0] for b in boxes),
-            min(b[1] for b in boxes),
-            max(b[2] for b in boxes),
-            max(b[3] for b in boxes),
-        ),
-        font_size=max((line.size for line in lines if line.size), default=None),
-        bold=sum(line.bold * line.chars for line in lines) / chars,
-        footnote_refs=[ref for line in lines for ref in line.refs],
+        block=block_number,
     )
 
 
 def _is_table(rows: list[list[str]]) -> bool:
-    """Reject layouts that merely look like tables: single filled column or prose lines."""
+    """Reject layouts that merely look like tables: one filled column, prose lines, or
+    rows that continue each other's sentences."""
     filled = [[bool(cell.strip()) for cell in row] for row in rows]
     columns = max(len(row) for row in filled)
     used = [i for i in range(columns) if any(i < len(row) and row[i] for row in filled)]
     multi_cell = sum(1 for row in filled if sum(row) >= 2)
-    return len(used) >= MIN_TABLE_COLUMNS and multi_cell / len(rows) >= MIN_MULTI_CELL_ROWS
+    if len(used) < config.MIN_TABLE_COLUMNS or multi_cell / len(rows) < config.MIN_MULTI_CELL_ROWS:
+        return False
+    main = max(used, key=lambda i: sum(1 for row in filled if i < len(row) and row[i]))
+    cells = [row[main].strip() if main < len(row) else "" for row in rows]
+    pairs = [(a, b) for a, b in zip(cells, cells[1:], strict=False) if a and b]
+    running = sum(1 for a, b in pairs if not _SENTENCE_END.search(a) and b[:1].islower())
+    return not pairs or running < config.RUNNING_TEXT_ROWS * len(pairs)
 
 
-def _find_tables(page: pymupdf.Page, number: int) -> list[RawBlock]:
-    if len(page.get_cdrawings()) < MIN_RULING_PATHS:  # type: ignore[no-untyped-call]
+def _find_tables(page: pymupdf.Page, number: int, drawings: int) -> list[RawBlock]:
+    if drawings < config.MIN_RULING_PATHS:
         return []
     tables: list[RawBlock] = []
     for table in page.find_tables().tables:  # type: ignore[no-untyped-call]
         rows = [[cell or "" for cell in row] for row in table.extract()]
-        if len(rows) >= MIN_TABLE_ROWS and _is_table(rows):
+        if len(rows) >= config.MIN_TABLE_ROWS and _is_table(rows):
             tables.append(RawBlock(text="", page=number, bbox=tuple(table.bbox), rows=rows))
     return tables
 

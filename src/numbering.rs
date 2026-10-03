@@ -1,5 +1,7 @@
 //! Detection of section numbering and list markers at the start of a line.
 
+use std::sync::RwLock;
+
 use crate::chars::is_apostrophe;
 
 pub struct Numbering {
@@ -7,27 +9,27 @@ pub struct Numbering {
     pub depth: usize,
 }
 
-const KEYWORDS: &[(&str, usize)] = &[
-    ("раздел", 1),
-    ("тема", 1),
-    ("приложение", 1),
-    ("глава", 2),
-    ("часть", 2),
-    ("статья", 4),
-    ("параграф", 3),
-    ("mavzu", 1),
-    ("bolim", 1),
-    ("ilova", 1),
-    ("bob", 2),
-    ("qism", 2),
-    ("modda", 4),
-    ("мавзу", 1),
-    ("бўлим", 1),
-    ("илова", 1),
-    ("боб", 2),
-    ("қисм", 2),
-    ("модда", 4),
-];
+/// Chapter/section words and their rank (1 = largest unit). Set from Python's config
+/// (`uzru_parser.config.HEADING_KEYWORDS`), the single place where the list lives.
+static KEYWORDS: RwLock<Vec<(String, usize)>> = RwLock::new(Vec::new());
+
+/// Replace the keyword list. Words are compared lowercased and without apostrophes.
+pub fn set_keywords(keywords: Vec<(String, usize)>) {
+    let normalized = keywords
+        .into_iter()
+        .map(|(word, rank)| (bare_lowercase(&word), rank))
+        .collect();
+    if let Ok(mut list) = KEYWORDS.write() {
+        *list = normalized;
+    }
+}
+
+fn bare_lowercase(word: &str) -> String {
+    word.chars()
+        .filter(|&c| !is_apostrophe(c))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
 
 const BULLETS: &[char] = &['•', '·', '▪', '●', '○', '■', '◦', '–', '—', '-', '*'];
 
@@ -36,21 +38,16 @@ fn leading_word(text: &str) -> (String, &str) {
     let end = text
         .find(|c: char| !(c.is_alphabetic() || is_apostrophe(c)))
         .unwrap_or(text.len());
-    let word = text[..end]
-        .chars()
-        .filter(|&c| !is_apostrophe(c))
-        .flat_map(char::to_lowercase)
-        .collect();
-    (word, &text[end..])
+    (bare_lowercase(&text[..end]), &text[end..])
 }
 
 const PARAGRAPH_SIGN: char = '§';
 const PARAGRAPH_DEPTH: usize = 3;
 
 fn depth_of(word: &str) -> Option<usize> {
-    KEYWORDS
-        .iter()
-        .find(|(k, _)| *k == word)
+    let list = KEYWORDS.read().ok()?;
+    list.iter()
+        .find(|(k, _)| k == word)
         .map(|&(_, depth)| depth)
 }
 
@@ -80,7 +77,7 @@ fn keyword_first(text: &str) -> Option<usize> {
     (next.is_ascii_digit() || is_roman(next)).then_some(depth)
 }
 
-/// Number followed by a keyword, the Uzbek order: "1-modda", "12-bob", "I BOʻLIM".
+/// Number followed by a keyword, the Uzbek order: "1-modda", "12-bob", "I BOʻLIM", "II-BOB".
 fn number_first(text: &str) -> Option<usize> {
     let digits = text
         .find(|c: char| !c.is_ascii_digit())
@@ -93,11 +90,15 @@ fn number_first(text: &str) -> Option<usize> {
         rest
     } else {
         let numeral = text.find(|c: char| !is_roman(c)).unwrap_or(text.len());
-        let rest = &text[numeral..];
-        if digits != 0 || !(1..=6).contains(&numeral) || !rest.starts_with(char::is_whitespace) {
+        let after = &text[numeral..];
+        if digits != 0 || !(1..=6).contains(&numeral) {
             return None;
         }
-        rest.trim_start()
+        match after.trim_start().strip_prefix('-') {
+            Some(rest) => rest.trim_start(),
+            None if after.starts_with(char::is_whitespace) => after.trim_start(),
+            None => return None,
+        }
     };
     depth_of(&leading_word(rest).0)
 }
@@ -127,8 +128,18 @@ fn decimal_depth(text: &str) -> Option<usize> {
         }
         break;
     }
-    let rest = &text[i..];
-    let has_title = rest.starts_with(char::is_whitespace) && !rest.trim().is_empty();
+    let mut rest = &text[i..];
+    if !trailing_dot {
+        // "5.3 . Title"
+        if let Some(after_dot) = rest.trim_start().strip_prefix('.') {
+            trailing_dot = true;
+            rest = after_dot;
+        }
+    }
+    // "5.3.Title": a title glued to the final dot.
+    let glued_title = trailing_dot && rest.starts_with(char::is_alphabetic);
+    let has_title =
+        (rest.starts_with(char::is_whitespace) || glued_title) && !rest.trim().is_empty();
     (has_title && (trailing_dot || groups > 1)).then_some(groups)
 }
 
@@ -203,7 +214,34 @@ pub fn numbering_info(line: &str) -> Option<Numbering> {
 mod tests {
     use super::*;
 
+    /// Mirrors the default list in `uzru_parser.config` (tests only).
+    fn install_keywords() {
+        let words = [
+            ("раздел", 1),
+            ("тема", 1),
+            ("приложение", 1),
+            ("глава", 2),
+            ("часть", 2),
+            ("параграф", 3),
+            ("статья", 4),
+            ("mavzu", 1),
+            ("boʻlim", 1),
+            ("ilova", 1),
+            ("bob", 2),
+            ("qism", 2),
+            ("modda", 4),
+            ("мавзу", 1),
+            ("бўлим", 1),
+            ("илова", 1),
+            ("боб", 2),
+            ("қисм", 2),
+            ("модда", 4),
+        ];
+        set_keywords(words.iter().map(|&(w, r)| (w.to_string(), r)).collect());
+    }
+
     fn info(s: &str) -> Option<(&'static str, usize)> {
+        install_keywords();
         numbering_info(s).map(|n| (n.kind, n.depth))
     }
 
@@ -215,6 +253,10 @@ mod tests {
         assert_eq!(info("2024. Год"), None);
         assert_eq!(info("5 штук"), None);
         assert_eq!(info("1."), None);
+        assert_eq!(info("5.3.Banklarning turlari"), Some(("decimal", 2)));
+        assert_eq!(info("5.3 . Banklarning turlari"), Some(("decimal", 2)));
+        assert_eq!(info("12.05.2020 yil"), None);
+        assert_eq!(info("1.5кг"), None);
     }
 
     #[test]
@@ -246,6 +288,11 @@ mod tests {
         assert_eq!(info("Тема 5. Валютные операции"), Some(("keyword", 1)));
         assert_eq!(info("5 - modda. Erkinlik"), Some(("keyword", 4)));
         assert_eq!(info("1-MAVZUGA oid"), None);
+        assert_eq!(info("I-BOB. PUL VA KREDIT"), Some(("keyword", 2)));
+        assert_eq!(info("II - BOB"), Some(("keyword", 2)));
+        assert_eq!(info("IV BOB"), Some(("keyword", 2)));
+        assert_eq!(info("I-qism davomi"), Some(("keyword", 2)));
+        assert_eq!(info("II-jahon urushi"), None);
         assert_eq!(info("I BOʻLIM. UMUMIY QOIDALAR"), Some(("keyword", 1)));
         assert_eq!(info("XIII BOB"), Some(("keyword", 2)));
         assert_eq!(info("3-қисм. Умумий"), Some(("keyword", 2)));
