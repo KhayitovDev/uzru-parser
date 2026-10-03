@@ -12,7 +12,7 @@ difficult documents can later fall back to OCR/Docling.
 Python API  (parse / Parser, later chunk / Chunker, CLI)
    │
    ├── format readers (Python ecosystem)
-   │     PDF → PyMuPDF      DOCX → python-docx (planned)      TXT/MD (planned)
+   │     PDF → PyMuPDF      DOCX → python-docx      TXT/MD (planned)
    │
    ▼
 Rust core  (uzru_parser._core, embedded native extension)
@@ -43,6 +43,17 @@ Format readers produce `RawBlock`s (text, page, bbox, font size, bold share).
   line without sentence punctuation. Level comes from numbering depth, else font-size rank.
 * **List**: lines starting with a bullet or `1)` / `a)`; adjacent list blocks are merged.
 * A long numbered clause (`1.1. Стороны обязуются ...`) stays a paragraph.
+
+## Readers
+
+* **PDF** (`pdf.py`): text blocks with font size and bold share from PyMuPDF. Ruled tables
+  come from `find_tables()`, which only runs on pages with at least four vector paths because
+  it is expensive. Text inside a table is not repeated as paragraphs. `layout.py` removes page
+  numbers and text repeated in the top/bottom 10% of at least half the pages. A page with
+  images and almost no text gets `needs_ocr`, the hook for a future OCR/Docling fallback.
+* **DOCX** (`docx.py`): heading level from the style (`Heading N`, localized names, `Title`,
+  inherited styles), lists from numbering/`List*` styles, tables from the table XML. Unstyled
+  paragraphs fall back to the same heuristics as PDF. Pages are approximate (page breaks).
 
 ## Chunking (`chunking.py`)
 
