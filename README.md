@@ -24,21 +24,72 @@ Windows (x64), for CPython 3.10 and newer.
 
 ## Quick start
 
-```python
-from uzru_parser import Chunker, parse
+**Input**: `sample.docx`, a short Uzbek document with a title and two numbered sections:
 
-document = parse("contract.docx")  # or "contract.pdf" with the pdf extra
-print(document.metadata.title, document.language.language)
+```text
+Ijara shartnomasi                                   (Heading 1)
 
-for block in document.blocks[:5]:
-    print(block.type.value, block.page, block.text[:60])
+1. Umumiy qoidalar                                  (Heading 2)
+Ushbu shartnoma ijaraga beruvchi va ijarachi o‘rtasida turar joyni
+vaqtincha foydalanishga berish shartlarini belgilaydi.
 
-chunks = Chunker(max_tokens=600, overlap=80).chunk(document)
-for chunk in chunks[:3]:
-    print(chunk.heading_path, chunk.page_start, chunk.text[:80])
+2. Tomonlarning majburiyatlari                      (Heading 2)
+Ijarachi ijara haqini har oyning 10-sanasigacha to‘laydi va turar joyni
+ozoda saqlaydi.
 ```
 
-`document.to_dict()` and `chunk.to_dict()` give plain JSON-ready dictionaries.
+**Code**:
+
+```python
+import json
+from uzru_parser import Chunker, parse
+
+document = parse("sample.docx")  # or "sample.pdf" with the pdf extra
+chunks = Chunker(max_tokens=600, overlap=80).chunk(document)
+
+for chunk in chunks:
+    print(json.dumps(chunk.to_dict(), ensure_ascii=False, indent=2))
+```
+
+**Output**: one JSON object per chunk, each section with the headings above it:
+
+```json
+{
+  "chunk_id": "61725848e421179b-0000",
+  "document_id": "61725848e421179b",
+  "text": "Ijara shartnomasi\n\n1. Umumiy qoidalar\n\nUshbu shartnoma ijaraga beruvchi va ijarachi oʻrtasida turar joyni vaqtincha foydalanishga berish shartlarini belgilaydi.",
+  "language": "uz",
+  "script": "latin",
+  "page_start": 1,
+  "page_end": 1,
+  "heading_path": [
+    "Ijara shartnomasi",
+    "1. Umumiy qoidalar"
+  ],
+  "chunk_index": 0,
+  "token_count": 44,
+  "metadata": {}
+}
+{
+  "chunk_id": "61725848e421179b-0001",
+  "document_id": "61725848e421179b",
+  "text": "2. Tomonlarning majburiyatlari\n\nIjarachi ijara haqini har oyning 10-sanasigacha toʻlaydi va turar joyni ozoda saqlaydi.",
+  "language": "uz",
+  "script": "latin",
+  "page_start": 1,
+  "page_end": 1,
+  "heading_path": [
+    "Ijara shartnomasi",
+    "2. Tomonlarning majburiyatlari"
+  ],
+  "chunk_index": 1,
+  "token_count": 33,
+  "metadata": {}
+}
+```
+
+`ensure_ascii=False` keeps Cyrillic and Uzbek letters readable instead of `\u` escapes.
+`document.to_dict()` gives the whole parsed document (pages, blocks, language) the same way.
 
 ## Output
 
