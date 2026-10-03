@@ -33,13 +33,25 @@ be improved independently.
    alphabet (UTS #39 confusables, per word), apostrophes, spaces. No private-use character
    survives.
 2. Line → paragraph rebuilding (`paragraphs.py`) from the document's own statistics (body
-   font size, typical line gap, right edge, whether the producer writes one block per line);
-   figure labels are grouped (`role="figure"`).
+   font size, typical line gap, right edge, whether the producer writes one block per line):
+   justified lines stored word by word are rejoined, inline formula pieces stay in their
+   sentence, lone list markers join their text. Figure labels are grouped
+   (`role="figure"`); line shading and shaded text areas are not figures, and a paragraph's
+   short last line is never a label.
 3. Hyphen rejoining with the document's own compounds kept (`Hyphenator`).
-4. Page furniture, footnotes, title page, contents (by shape) and back matter (`layout.py`).
+4. Page furniture, footnotes, title page, contents (by shape; several per book, with their
+   title line) and back matter (`layout.py`); then formula and chart fragments are grouped
+   into `role="formula"` blocks.
 5. Headings and levels (`structure.py`): bookmarks, then the contents page, then numbering,
-   then font; a heading needs two signals and real words; a plain "N." item is a list item
-   unless it belongs to a heading sequence; a child never sits above its parent.
+   then font; a heading needs two signals and real words (an unnumbered one a word of 4+
+   letters); a plain "N." item is a list item unless it belongs to a heading sequence.
+   Vetoes: outline entries (a plan whose numbered titles return later as headings),
+   formulas, captions above a table, figure or formula (`role="caption"`), text inside a
+   table frame or a labelled drawing, run-in titles whose sentence runs on, ":" labels.
+   Recurring heading text gets one decision. Levels: an unnumbered heading takes the level
+   of the numbered headings it looks like, else sits inside the chapter; chapter words that
+   never nest share a level; "1., 2." restarting inside "N.M" nest under it; a child never
+   sits above its parent; levels are dense. Wrapped titles are joined.
 6. Language per block, short blocks borrow their neighbours'; document language weighted by
    length.
 7. Chunking.
@@ -68,19 +80,29 @@ Format readers produce `RawBlock`s (text, page, bbox, font size, bold share).
 
 * **PDF** (`pdf.py`): text blocks with font size and bold share from PyMuPDF. Ruled tables
   come from `find_tables()`, which only runs on pages with at least four vector paths because
-  it is expensive. Text inside a table is not repeated as paragraphs. `layout.py` removes page
+  it is expensive; a table grows over the merged rows its own ruling closes. Text inside a
+  table is not repeated as paragraphs. PyMuPDF is not thread-safe, so one document is read
+  at a time under a lock (threads are safe but serialised; processes run in parallel). The
+  title page gives the title when the file has none. `layout.py` removes page
   numbers and text repeated in the top/bottom 10% of at least half the pages. A page with
   images and almost no text gets `needs_ocr`, the hook for a future OCR/Docling fallback.
 * **DOCX** (`docx.py`): heading level from the style (`Heading N`, localized names, `Title`,
-  inherited styles), lists from numbering/`List*` styles, tables from the table XML. Unstyled
-  paragraphs fall back to the same heuristics as PDF. Pages are approximate (page breaks).
+  `w:outlineLvl`, inherited styles), lists from numbering/`List*` styles with Word's own
+  markers ("1.", "a)", "•" from `numbering.xml`), tables from the table XML. A short paragraph
+  set entirely in bold (or kept with the next) and followed by plain text is a subheading one
+  level below the numbered heading before it; extra space above marks a paragraph as set
+  apart. Leading centred bold lines are the title when Word's title property is empty.
+  Unstyled paragraphs fall back to the same heuristics as PDF. Pages are approximate.
 
 ## Chunking (`chunking.py`)
 
 Input is only the `Document`. Every heading starts a new chunk; inside a section whole
 blocks are packed up to `max_tokens`. Oversized blocks are split by sentences (lines for
 lists/tables, words as a last resort). Overlap repeats trailing sentences of the previous
-chunk within the same section only. Tokens are estimated (about 4 characters per token);
+chunk within the same section only, and never opens with list items cut off from their
+lead-in. A lead-in line ending with ":" moves to the chunk with what it introduces. Blocks
+with `role` `toc`, `back_matter` or `title_page` stay in `document.blocks` but never enter
+chunk text; `figure` and `formula` blocks never form a chunk alone. Tokens are estimated (about 4 characters per token);
 pass `token_counter` to use a real tokenizer. Each chunk carries `heading_path`, page range,
 language/script and an extensible `metadata` dict.
 

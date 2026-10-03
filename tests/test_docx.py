@@ -163,3 +163,77 @@ def test_finished_paragraphs_in_docx_are_not_joined(tmp_path: Path) -> None:
     blocks = parse(path).blocks
     assert len(blocks) == 7
     assert blocks[5].type is BlockType.HEADING
+
+
+def save(document: docx.document.Document, path: Path) -> Path:
+    document.save(str(path))
+    return path
+
+
+def centred_bold(document: docx.document.Document, text: str) -> None:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    paragraph = document.add_paragraph()
+    paragraph.add_run(text).bold = True
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+
+def guide(tmp_path: Path) -> Path:
+    document = docx.Document()
+    centred_bold(document, "Foydalanuvchi qoʻllanmasi")
+    centred_bold(document, "Markaziy bankning mobil ilovasi")
+    bold_paragraph(document, "1. Umumiy maʼlumot")
+    document.add_paragraph("Ilova foydalanuvchilarga bank tizimi haqida maʼlumot beradi.")
+    bold_paragraph(document, "Kredit limiti")
+    document.add_paragraph("Kredit limiti bank berishga tayyor boʻlgan eng katta summadir.")
+    paragraph = document.add_paragraph()
+    paragraph.add_run("Overdraft.").bold = True
+    paragraph.add_run(" Overdraft hisobdagidan koʻp mablagʻdan foydalanish imkoniyatidir.")
+    bold_paragraph(document, "Ilovadan qanday foydalanaman?")
+    document.add_paragraph("Ilovani yuklab oling va roʻyxatdan oʻting.")
+    for step in ("Ilovani oching", "Raqamni kiriting", "Kodni tasdiqlang"):
+        document.add_paragraph(step, style="List Number")
+    bold_paragraph(document, "2. Xavfsizlik")
+    document.add_paragraph("Parolni hech kimga bermang.")
+    return save(document, tmp_path / "guide.docx")
+
+
+def test_bold_standalone_paragraphs_are_subheadings(tmp_path: Path) -> None:
+    blocks = parse(guide(tmp_path)).blocks
+    headings = [(b.text, b.level) for b in blocks if b.type is BlockType.HEADING]
+    assert headings == [
+        ("1. Umumiy maʼlumot", 1),
+        ("Kredit limiti", 2),
+        ("Ilovadan qanday foydalanaman?", 2),
+        ("2. Xavfsizlik", 1),
+    ]
+    run_in = next(b for b in blocks if b.text.startswith("Overdraft."))
+    assert run_in.type is BlockType.PARAGRAPH
+
+
+def test_word_numbered_list_keeps_its_numbers(tmp_path: Path) -> None:
+    lists = [b for b in parse(guide(tmp_path)).blocks if b.type is BlockType.LIST]
+    assert lists[-1].extra["items"] == [
+        "1. Ilovani oching",
+        "2. Raqamni kiriting",
+        "3. Kodni tasdiqlang",
+    ]
+
+
+def test_leading_centred_bold_lines_are_the_title(tmp_path: Path) -> None:
+    document = parse(guide(tmp_path))
+    assert document.metadata.title == "Foydalanuvchi qoʻllanmasi Markaziy bankning mobil ilovasi"
+    chunks = chunk(document)
+    assert not any(c.text.startswith("Foydalanuvchi qoʻllanmasi") for c in chunks)
+    assert chunks[0].heading_path == ["1. Umumiy maʼlumot"]
+
+
+def test_bullet_list_stays_bulleted(tmp_path: Path) -> None:
+    document = docx.Document()
+    document.add_paragraph("Ilova quyidagilarni taqdim etadi:")
+    for item in ("maʼlumot", "xizmatlar"):
+        document.add_paragraph(item, style="List Bullet")
+    lists = [
+        b for b in parse(save(document, tmp_path / "b.docx")).blocks if b.type is BlockType.LIST
+    ]
+    assert lists[0].extra["items"] == ["• maʼlumot", "• xizmatlar"]

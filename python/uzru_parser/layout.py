@@ -146,6 +146,22 @@ def _is_toc_page(
     return not pairs or ascending >= config.TOC_ASCENDING_SHARE * len(pairs), holders
 
 
+def _mark_contents_title(blocks: list[RawBlock], first: int) -> None:
+    """The short title line right above a contents run ("CONTENTS", "Оглавление") belongs to
+    it, also when it is not in the list of known titles."""
+    above = first - 1
+    while above >= 0 and blocks[above].footnote:
+        above -= 1
+    if above < 0:
+        return
+    raw = blocks[above]
+    words = raw.text.split()
+    same_page = raw.page == blocks[first].page
+    title_like = 0 < len(words) <= config.TOC_TITLE_WORDS and raw.text.rstrip()[-1:] not in ".;,"
+    if same_page and title_like and raw.role is None and raw.rows is None:
+        raw.role = "toc"
+
+
 def mark_toc(blocks: list[RawBlock], page_count: int) -> None:
     """Mark the contents pages (``role="toc"``) and the back matter after a final contents.
 
@@ -193,6 +209,7 @@ def mark_toc(blocks: list[RawBlock], page_count: int) -> None:
     for run in runs:
         for index in run:
             blocks[index].role = "toc"
+        _mark_contents_title(blocks, run[0])
     final = runs[-1] if runs else None
     if final and blocks[final[0]].page >= page_count * config.BACK_MATTER_START:
         for raw in blocks[final[-1] + 1 :]:

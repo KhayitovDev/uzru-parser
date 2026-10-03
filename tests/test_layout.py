@@ -258,3 +258,22 @@ def test_reference_list_after_the_contents_is_not_another_contents() -> None:
     ]
     mark_toc(blocks, page_count=200)
     assert [b.role for b in blocks[-5:]] == [None] * 5
+
+
+def test_unknown_contents_title_above_the_entries_joins_the_contents() -> None:
+    blocks = [
+        page_block("Kirish soʻzi tugadi.", 4, 60),
+        page_block("BOBLAR ROʻYXATI", 4, 80),
+        *[page_block(f"{n}-bob. Sarlavha ........ {n * 10}", 4, 100 + 20 * n) for n in range(1, 5)],
+    ]
+    mark_toc(blocks, page_count=200)
+    assert [b.role for b in blocks] == [None] + ["toc"] * 5
+
+
+def test_sentence_above_the_contents_is_not_its_title() -> None:
+    blocks = [
+        page_block("Mundarija quyida berilgan.", 4, 80),
+        *[page_block(f"{n}-bob. Sarlavha ........ {n * 10}", 4, 100 + 20 * n) for n in range(1, 5)],
+    ]
+    mark_toc(blocks, page_count=200)
+    assert blocks[0].role is None

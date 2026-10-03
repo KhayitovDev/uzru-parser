@@ -11,7 +11,7 @@ from .models import Block, BlockType, Document
 from .text import detect_language, estimate_tokens, split_sentences
 
 PARAGRAPH_JOINER = "\n\n"
-DEFAULT_SKIP_ROLES = ("toc", "back_matter")
+DEFAULT_SKIP_ROLES = ("toc", "back_matter", "title_page")
 LINE_TYPES = (BlockType.LIST, BlockType.TABLE, BlockType.CODE)
 
 
@@ -279,14 +279,38 @@ class _Run:
         budget = self.chunker.overlap
         tail: list[_Unit] = []
         body = [u for u in self.units if u.kind is not BlockType.HEADING and not u.figure]
+        start = len(body)
         for unit in reversed(body):
             if unit.tokens <= budget:
                 tail.insert(0, unit)
                 budget -= unit.tokens
+                start -= 1
                 continue
             if not tail:
                 tail = self._fitting_tail(unit, budget)
             break
+        return self._complete_list_start(tail, body, start, budget)
+
+    @staticmethod
+    def _complete_list_start(
+        tail: list[_Unit], body: list[_Unit], start: int, budget: int
+    ) -> list[_Unit]:
+        """An overlap never opens with list items cut off from their lead-in ("... the
+        following:"): it reaches back to the lead-in when that fits, else starts after the
+        list."""
+        if not tail or tail[0].kind is not BlockType.LIST:
+            return tail
+        whole_list = start > 0 and body[start - 1].kind is not BlockType.LIST and start < len(body)
+        lead = body[start - 1] if start > 0 else None
+        is_lead = (
+            lead is not None
+            and lead.kind is BlockType.PARAGRAPH
+            and lead.text.rstrip().endswith(":")
+        )
+        if whole_list and is_lead and lead is not None and lead.tokens <= budget:
+            return [lead, *tail]
+        while tail and tail[0].kind is BlockType.LIST:
+            tail.pop(0)
         return tail
 
     def _fitting_tail(self, unit: _Unit, budget: int) -> list[_Unit]:

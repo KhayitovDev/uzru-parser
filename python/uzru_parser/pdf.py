@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,9 @@ MARK_RAISE_RATIO = 0.15
 _PRIVATE_USE = re.compile("[\ue000-\uf8ff]")
 _ONLY_PRIVATE_USE = re.compile(r"\s*[\ue000-\uf8ff]+\s*")
 _SENTENCE_END = re.compile(r"[.!?:…;]\s*$")
+#: PyMuPDF is not thread-safe, and ``Page.find_tables`` flips a process-wide setting that
+#: changes later text boxes; one document is read at a time, in any thread.
+_PYMUPDF_LOCK = threading.Lock()
 
 
 @dataclass
@@ -61,7 +65,7 @@ def parse_pdf(path: str | Path, detect_tables: bool = True) -> Document:
     pages: list[Page] = []
     contents: list[_PageContent] = []
 
-    with pymupdf.open(path) as pdf:  # type: ignore[no-untyped-call]
+    with _PYMUPDF_LOCK, pymupdf.open(path) as pdf:  # type: ignore[no-untyped-call]
         meta = pdf.metadata or {}
         outline = [
             OutlineEntry(level=entry[0], title=clean(entry[1]), page=entry[2])
@@ -84,7 +88,9 @@ def parse_pdf(path: str | Path, detect_tables: bool = True) -> Document:
     hyphenator = Hyphenator(sorted(compounds))
     raw_blocks: list[RawBlock] = []
     for content in contents:
-        regions = figure_regions(content.drawings, content.page_box, layout.body_size)
+        regions = figure_regions(
+            content.drawings, content.page_box, layout.body_size, content.lines
+        )
         blocks = [
             block
             for part in reading_regions(content.lines, content.boxes, layout.body_size)
@@ -108,10 +114,24 @@ def parse_pdf(path: str | Path, detect_tables: bool = True) -> Document:
         "pdf",
         pages,
         document_blocks,
-        title=meta.get("title"),
+        title=meta.get("title") or _title_page_title(raw_blocks),
         author=meta.get("author"),
         extra={"removed_page_furniture": removed, **stats.as_dict()},
     )
+
+
+def _title_page_title(blocks: list[RawBlock]) -> str | None:
+    """The title page's largest lines, in reading order, when the file names no title."""
+    page = [b for b in blocks if b.role == "title_page" and b.font_size and b.text.strip()]
+    if not page:
+        return None
+    largest = max(b.font_size or 0.0 for b in page)
+    title = [
+        " ".join(b.text.split())
+        for b in page
+        if (b.font_size or 0.0) >= largest / config.LARGER_FONT_RATIO
+    ]
+    return " ".join(title) or None
 
 
 def _read_page(
@@ -137,6 +157,10 @@ def _read_page(
             chars += line.chars
             if not any(_inside(line.bbox, table.bbox) for table in tables):
                 lines.append(line)
+
+    rects: list[BBox] = [tuple(d["rect"]) for d in drawings]
+    for table in tables:
+        lines = _extend_table(table, rects, lines)
 
     return _PageContent(
         number=number,
@@ -285,6 +309,36 @@ def _find_tables(page: pymupdf.Page, number: int, drawings: int) -> list[RawBloc
         if len(rows) >= config.MIN_TABLE_ROWS and _is_table(rows):
             tables.append(RawBlock(text="", page=number, bbox=tuple(table.bbox), rows=rows))
     return tables
+
+
+def _extend_table(table: RawBlock, rects: list[BBox], lines: list[Line]) -> list[Line]:
+    """Grow a table over the rows its own ruling closes below the detected box (a merged last
+    row): vertical rules or a full-width cell starting inside the table and reaching further
+    down. Text in the added part becomes the table's last row; the remaining lines return."""
+    if table.bbox is None or table.rows is None:
+        return lines
+    x0, y0, x1, y1 = table.bbox
+    slack = config.TABLE_RULE_SLACK * (y1 - y0)
+    continuing = [
+        r
+        for r in rects
+        if r[0] >= x0 - slack
+        and r[2] <= x1 + slack
+        and y0 - slack <= r[1] <= y1 + slack
+        and r[3] > y1 + slack
+        and (r[2] - r[0] <= slack or r[2] - r[0] >= 0.5 * (x1 - x0))
+    ]
+    if len(continuing) < 2 and not any(r[2] - r[0] >= 0.5 * (x1 - x0) for r in continuing):
+        return lines
+    bottom = max(r[3] for r in continuing)
+    extended = (x0, y0, x1, bottom)
+    added = [line for line in lines if _inside(line.bbox, extended)]
+    if added:
+        columns = max(len(row) for row in table.rows)
+        text = " ".join(line.text for line in added)
+        table.rows.append([text] + [""] * (columns - 1))
+    table.bbox = extended
+    return [line for line in lines if not any(line is other for other in added)]
 
 
 def _inside(box: BBox | None, container: BBox | None) -> bool:

@@ -1,5 +1,6 @@
 import pytest
 from uzru_parser import Block, BlockType, Chunker, Document, DocumentMetadata, chunk
+from uzru_parser.chunking import _Run, _Unit
 from uzru_parser.text import estimate_tokens
 
 
@@ -154,14 +155,16 @@ def test_contents_and_back_matter_stay_out_of_chunks() -> None:
     assert "MUNDARIJA" in kept[0].text
 
 
-def test_title_page_blocks_make_no_heading_path() -> None:
+def test_title_page_stays_in_the_document_but_out_of_chunks() -> None:
     doc = make_doc(
         with_role(para("TOSHKENT DAVLAT IQTISODIYOT UNIVERSITETI"), "title_page"),
         head("1-MAVZU: KIRISH", 1),
         para("Matn."),
     )
-    first, second = chunk(doc)
-    assert first.heading_path == [] and second.heading_path == ["1-MAVZU: KIRISH"]
+    chunks = chunk(doc)
+    assert [c.text for c in chunks] == ["1-MAVZU: KIRISH\n\nMatn."]
+    assert chunks[0].heading_path == ["1-MAVZU: KIRISH"]
+    assert doc.blocks[0].text == "TOSHKENT DAVLAT IQTISODIYOT UNIVERSITETI"
 
 
 def test_topic_heading_starts_a_new_chunk_even_after_a_small_chunk() -> None:
@@ -318,3 +321,31 @@ def test_formula_blocks_never_form_a_chunk_of_their_own() -> None:
     )
     chunks = Chunker(max_tokens=100, overlap=0).chunk(doc)
     assert all(c.text.strip() != formula.text for c in chunks)
+
+
+def test_overlap_reaches_back_to_the_lead_in_of_a_list() -> None:
+    doc = make_doc(
+        head("1. ОБЩИЕ ПОЛОЖЕНИЯ", 1),
+        para(sentences(8)),
+        para("Для этого используются инструменты:"),
+        items(2),
+        para(sentences(8, "Продолжение")),
+    )
+    chunks = Chunker(max_tokens=150, overlap=60).chunk(doc)
+    for current in chunks[1:]:
+        assert not current.text.startswith("•")
+
+
+def test_overlap_without_room_for_the_lead_in_starts_after_the_list() -> None:
+    tail = [
+        _Unit("• пункт один;", 4, 1, BlockType.LIST),
+        _Unit("Текст после списка.", 5, 1, BlockType.PARAGRAPH),
+    ]
+    body = [
+        _Unit("Длинное вступление к списку, которое не помещается:", 30, 1, BlockType.PARAGRAPH),
+        *tail,
+    ]
+    assert [u.text for u in _Run._complete_list_start(list(tail), body, 1, 10)] == [
+        "Текст после списка."
+    ]
+    assert [u.text for u in _Run._complete_list_start(list(tail), body, 1, 40)][0].endswith(":")

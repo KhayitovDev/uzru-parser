@@ -391,3 +391,146 @@ def test_text_page_with_a_large_picture_is_not_flagged_for_ocr(tmp_path: Path) -
     doc.close()
 
     assert not parse(pdf_path).needs_ocr
+
+
+SHADED_TEXT = [
+    ("bold", "10.1. Guruhlarda ishlash tamoyillari"),
+    ("body", "Guruhda ishlash talabalarning faolligini oshiradi va har bir ishtirokchi"),
+    ("body", "oʻz fikrini erkin bildirishi uchun qulay sharoit yaratadi. Bu jarayon"),
+    ("body", "taqdimot garovidir."),
+    ("body", "Taqdimotga tayyorlanishda quyidagi bosqichlarni ajratish"),
+    ("body", "mumkin:"),
+    ("bold", "10.2. Taqdimotga tayyorlanish bosqichlari"),
+    ("body", "Har bir bosqichda maqsad aniq belgilanadi va natijalar tahlil qilinadi."),
+]
+
+
+def shaded_pdf(path: Path) -> Path:
+    """Every line has a filled band behind it, as Word exports often draw."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_font(fontname="f", fontfile=cyrillic_font())
+    page.insert_font(fontname="b", fontfile=bold_font())
+    y = 100.0
+    for style, text in SHADED_TEXT:
+        if style == "bold":
+            y += 12
+        page.draw_rect(pymupdf.Rect(70, y - 11, 525, y + 4), color=None, fill=(0.95, 0.95, 0.95))
+        page.insert_text((72, y), text, fontname="b" if style == "bold" else "f", fontsize=11)
+        y += 16 if style == "bold" else 15
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_line_shading_is_not_a_figure(tmp_path: Path) -> None:
+    blocks = parse(shaded_pdf(tmp_path / "shaded.pdf")).blocks
+    headings = [b.text for b in blocks if b.type is BlockType.HEADING]
+    assert headings == [
+        "10.1. Guruhlarda ishlash tamoyillari",
+        "10.2. Taqdimotga tayyorlanish bosqichlari",
+    ]
+    assert not [b for b in blocks if b.extra.get("role") == "figure"]
+    assert any(b.text.endswith("Bu jarayon taqdimot garovidir.") for b in blocks)
+
+
+def test_chart_with_bars_and_labels_is_still_a_figure(tmp_path: Path) -> None:
+    path = tmp_path / "chart.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_font(fontname="f", fontfile=cyrillic_font())
+    page.insert_textbox(
+        pymupdf.Rect(72, 72, 523, 200), " ".join([SHADED_TEXT[1][1]] * 4), fontname="f", fontsize=11
+    )
+    for i, label in enumerate(["Risklar", "Kredit", "Foiz", "Valyuta"]):
+        page.draw_rect(
+            pymupdf.Rect(120 + i * 90, 400 - 40 * i, 170 + i * 90, 500),
+            color=(0, 0, 0),
+            fill=(0.3, 0.3, 0.8),
+        )
+        page.insert_text((120 + i * 90, 515), label, fontname="f", fontsize=9)
+    doc.save(path)
+    doc.close()
+    figures = [b for b in parse(path).blocks if b.extra.get("role") == "figure"]
+    assert figures and "Risklar" in figures[0].text
+
+
+def ruled_tables_pdf(path: Path, pages: int = 6) -> Path:
+    doc = pymupdf.open()
+    for _ in range(pages):
+        page = doc.new_page()
+        page.insert_font(fontname="f", fontfile=cyrillic_font())
+        page.insert_textbox(
+            pymupdf.Rect(72, 60, 523, 140), SHADED_TEXT[1][1], fontname="f", fontsize=11
+        )
+        for row in range(5):
+            for col in range(3):
+                cell = pymupdf.Rect(72 + col * 150, 160 + row * 22, 222 + col * 150, 182 + row * 22)
+                page.draw_rect(cell, color=(0, 0, 0), width=0.7)
+                page.insert_text(
+                    (cell.x0 + 4, cell.y1 - 7), f"Qator {row} ustun {col}", fontname="f", fontsize=9
+                )
+        page.insert_textbox(
+            pymupdf.Rect(72, 300, 523, 400), SHADED_TEXT[2][1], fontname="f", fontsize=11
+        )
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_parsing_in_threads_gives_the_same_result(tmp_path: Path) -> None:
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = ruled_tables_pdf(tmp_path / "tables.pdf")
+    alone = json.dumps(parse(path).to_dict(), ensure_ascii=False)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(
+            pool.map(lambda _: json.dumps(parse(path).to_dict(), ensure_ascii=False), range(8))
+        )
+    assert all(result == alone for result in results)
+
+
+def table_block(rows: int = 3) -> "pdf.RawBlock":
+    data = [["Harakat", "Baho"]] + [[f"Band {i}", str(i)] for i in range(rows - 1)]
+    return pdf.RawBlock(text="", page=1, bbox=(70.0, 100.0, 530.0, 160.0), rows=data)
+
+
+def text_line(text: str, y: float) -> "pdf.Line":
+    return pdf.Line(text=text, bbox=(100.0, y, 300.0, y + 12.0), size=11.0, chars=len(text))
+
+
+def test_merged_last_row_closed_by_the_tables_ruling_joins_the_table() -> None:
+    table = table_block()
+    rules = [(70.0, 100.0, 70.5, 200.0), (530.0, 100.0, 530.5, 200.0), (70.0, 200.0, 530.0, 200.5)]
+    lines = [text_line("Xulosa:", 175.0), text_line("Jadvaldan keyingi matn.", 230.0)]
+    remaining = pdf._extend_table(table, rules, lines)
+    assert [line.text for line in remaining] == ["Jadvaldan keyingi matn."]
+    assert table.rows is not None and table.rows[-1][0] == "Xulosa:"
+
+
+def test_text_below_a_closed_table_stays_outside_it() -> None:
+    table = table_block()
+    rules = [(70.0, 100.0, 70.5, 160.0), (530.0, 100.0, 530.5, 160.0)]
+    lines = [text_line("Xulosa:", 175.0)]
+    assert pdf._extend_table(table, rules, lines) == lines
+    assert table.bbox == (70.0, 100.0, 530.0, 160.0)
+
+
+def test_title_page_gives_the_title_when_the_file_has_none(tmp_path: Path) -> None:
+    path = tmp_path / "book.pdf"
+    doc = pymupdf.open()
+    cover = doc.new_page()
+    cover.insert_font(fontname="f", fontfile=cyrillic_font())
+    cover.insert_text((150, 200), "TOSHKENT DAVLAT UNIVERSITETI", fontname="f", fontsize=12)
+    cover.insert_text((150, 300), "BANK ISHI ASOSLARI", fontname="f", fontsize=24)
+    cover.insert_text((250, 700), "Toshkent – 2021", fontname="f", fontsize=12)
+    for _ in range(2):  # a title page is looked for in books of a few pages
+        page = doc.new_page()
+        page.insert_font(fontname="f", fontfile=cyrillic_font())
+        text = " ".join([SHADED_TEXT[1][1]] * 20)
+        page.insert_textbox(pymupdf.Rect(72, 72, 523, 770), text, fontname="f", fontsize=11)
+    doc.set_metadata({})
+    doc.save(path)
+    doc.close()
+    assert parse(path).metadata.title == "BANK ISHI ASOSLARI"

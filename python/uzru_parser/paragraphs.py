@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import statistics
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from . import config
@@ -152,6 +153,7 @@ def merge_row_fragments(lines: list[Line]) -> list[Line]:
     """Put a lone section number ("1.1.", "II-BOB") or list marker ("1)", "•", "✓") and its
     text back on one line, a contents page number back after its leader ("Title …" +
     "7"), and an inline formula fragment back into the sentence on its row."""
+    lines = _attach_inline_formulas(lines)
     merged: list[Line] = []
     formula_end = False  # the last merged line ends with a formula fragment
     for line in lines:
@@ -173,6 +175,57 @@ def merge_row_fragments(lines: list[Line]) -> list[Line]:
         merged.append(line)
         formula_end = is_debris(line.text)
     return merged
+
+
+def _attach_inline_formulas(lines: list[Line]) -> list[Line]:
+    """Formula fragments (raised or lowered pieces: sub- and superscripts, operators) whose
+    middle lies within a text line's height, give or take half a line, and that sit beside the
+    line's pieces join that line, all pieces in reading order (x)."""
+    debris = [is_debris(line.text) for line in lines]
+    if not any(debris):
+        return lines
+    taken: set[int] = set()
+    rows: dict[int, list[int]] = {}
+    for index, line in enumerate(lines):
+        if debris[index] or index in taken:
+            continue
+        height = line.bbox[3] - line.bbox[1]
+        top, bottom = line.bbox[1] - 0.5 * height, line.bbox[3] + 0.5 * height
+        members = [index]
+        for other, piece in enumerate(lines):
+            if other == index or other in taken:
+                continue
+            middle = (piece.bbox[1] + piece.bbox[3]) / 2
+            same_band = top <= middle <= bottom
+            side_text = not debris[other] and (_same_row(line, piece) or _same_row(piece, line))
+            if same_band and (debris[other] or side_text):
+                members.append(other)
+        if len(members) > 1 and any(debris[m] for m in members) and _beside(lines, members):
+            rows[index] = members
+            taken.update(members)
+    if not rows:
+        return lines
+    out: list[Line] = []
+    for index, line in enumerate(lines):
+        if index in rows:
+            pieces = sorted((lines[m] for m in rows[index]), key=lambda piece: piece.bbox[0])
+            joined = pieces[0]
+            for piece in pieces[1:]:
+                joined = _join_row(joined, piece)
+            out.append(joined)
+        elif index not in taken:
+            out.append(line)
+    return out
+
+
+def _beside(lines: list[Line], members: list[int]) -> bool:
+    """The pieces stand side by side with small gaps (one printed line), none overlapping."""
+    pieces = sorted((lines[m] for m in members), key=lambda piece: piece.bbox[0])
+    size = max((piece.size or 10.0) for piece in pieces)
+    return all(
+        -1.0 <= b.bbox[0] - a.bbox[2] <= config.INLINE_FORMULA_GAP * size
+        for a, b in zip(pieces, pieces[1:], strict=False)
+    )
 
 
 def join_spread_lines(lines: list[Line], right_edge: float) -> list[Line]:
@@ -203,7 +256,7 @@ def join_spread_lines(lines: list[Line], right_edge: float) -> list[Line]:
         multi_word = sum(1 for piece in row[1:-1] if len(piece.text.split()) > 1)
         return (
             len(row) > 1
-            and len({_size_key(piece.size) for piece in row}) == 1
+            and _same_size(row)
             and multi_word == 0
             and all(
                 b.bbox[0] - a.bbox[2] <= config.SPREAD_LINE_GAP * size
@@ -225,24 +278,29 @@ def join_spread_lines(lines: list[Line], right_edge: float) -> list[Line]:
             first = ordered[other][0]
             gap = max(first.bbox[1] - row[0].bbox[3], row[0].bbox[1] - first.bbox[3])
             text_line = len(rows[other]) == 1 and starts_at_edge(first)
-            if (
-                _size_key(first.size) == _size_key(size)
-                and gap <= size
-                and (text_line or candidates[other])
-            ):
+            if _same_size([first, row[0]]) and gap <= size and (text_line or candidates[other]):
                 return True
         return False
 
     joined: list[Line] = []
     for index, row in enumerate(rows):
         if candidates[index] and running_text_beside(index):
-            line = ordered[index][0]
-            for piece in ordered[index][1:]:
+            pieces = ordered[index]
+            line = pieces[0]
+            for piece in pieces[1:]:
                 line = _join_row(line, piece)
+            # A bold lead word does not make the whole rebuilt line bold.
+            line.bold = sum(p.bold * p.chars for p in pieces) / max(1, line.chars)
             joined.append(line)
         else:
             joined.extend(row)
     return joined
+
+
+def _same_size(lines: list[Line]) -> bool:
+    """Font sizes within ``SAME_SIZE_TOLERANCE``: a bold run may report a slightly other size."""
+    sizes = [line.size or 0.0 for line in lines]
+    return max(sizes) - min(sizes) <= config.SAME_SIZE_TOLERANCE * max(sizes)
 
 
 def _on_row(a: Line, b: Line) -> bool:
@@ -298,8 +356,26 @@ def figure_labels(
         wide = line.bbox[2] - line.bbox[0] >= config.FULL_LINE_SHARE * (right_edge - left_edge)
         return wide and line.bbox[2] >= right_edge - config.PARAGRAPH_SHORT_LINE * size
 
+    def paragraph_tail(index: int) -> bool:
+        """A short line right under a full line that runs on into it ends that paragraph."""
+        if index == 0:
+            return False
+        above, line = lines[index - 1], lines[index]
+        size = line.size or body_size
+        gap = line.bbox[1] - above.bbox[3]
+        runs_on = not _ends_sentence(above.text) or _starts_lowercase(line.text)
+        return (
+            full(above)
+            and abs((above.size or body_size) - size) <= 0.5
+            and -0.5 * size <= gap <= size
+            and runs_on
+        )
+
+    tails = {i for i in range(len(lines)) if paragraph_tail(i)}
     labels: set[int] = set()
-    candidates = [i for i, line in enumerate(lines) if _is_label(line) and not full(line)]
+    candidates = [
+        i for i, line in enumerate(lines) if _is_label(line) and not full(line) and i not in tails
+    ]
     margin = config.FIGURE_LABEL_MARGIN * body_size
     for x0, y0, x1, y1 in regions:
         region = (x0 - margin, y0 - margin, x1 + margin, y1 + margin)
@@ -309,7 +385,12 @@ def figure_labels(
 
     run: list[int] = []
     for i, line in enumerate([*lines, None]):
-        if line is not None and _is_free_label(line, body_size) and not full(line):
+        if (
+            line is not None
+            and _is_free_label(line, body_size)
+            and not full(line)
+            and i not in tails
+        ):
             run.append(i)
             continue
         if len(run) >= config.FIGURE_MIN_LABELS_WITHOUT_DRAWING:
@@ -357,6 +438,16 @@ def _continues(paragraph: list[Line], line: Line, stats: LayoutStats, page_right
     # Producers that write whole paragraphs as blocks: a new block is a new paragraph
     # unless the sentence visibly runs on.
     return stats.line_blocks or line.block == last.block or not sentence_break
+
+
+def _left_edge(lines: list[Line], body_size: float) -> float:
+    """Left edge of the text: a low percentile of body lines' starts, or of all lines on a page
+    set in another size (front matter, an annotation)."""
+    body = [line.bbox[0] for line in lines if _is_body(line, body_size)]
+    starts = sorted(
+        body if len(body) >= config.MIN_COLUMN_LINES else [line.bbox[0] for line in lines]
+    )
+    return starts[int(LEFT_EDGE_PERCENTILE * (len(starts) - 1))] if starts else 0.0
 
 
 def _dash_in_sentence(paragraph: list[Line], line: Line, page_right: float) -> bool:
@@ -444,8 +535,7 @@ def build_paragraphs(
     page_right = right_edge()
     labels = figure_labels(lines, regions or [], stats.body_size, page_right)
 
-    body_left = sorted(line.bbox[0] for line in lines if _is_body(line, stats.body_size))
-    left_edge = body_left[int(LEFT_EDGE_PERCENTILE * (len(body_left) - 1))] if body_left else 0.0
+    left_edge = _left_edge(lines, stats.body_size)
 
     groups: list[tuple[str, int, list[Line]]] = []  # (kind, index of first line, lines)
     for index, line in enumerate(lines):
@@ -513,7 +603,40 @@ def group_formula_debris(blocks: list[RawBlock]) -> list[RawBlock]:
         block.text = " ".join(block.text.split())
         block.role = "formula"
         grouped.append(block)
-    return grouped
+    return _absorb_figure_fragments(grouped)
+
+
+def _absorb_figure_fragments(blocks: list[RawBlock]) -> list[RawBlock]:
+    """A short fragment between two formula or figure blocks, with no body text between them,
+    is one of their labels ("B FAM" between parts of a chart): it joins the block before it."""
+    out: list[RawBlock] = []
+    for index, block in enumerate(blocks):
+        previous = out[-1] if out else None
+        following = blocks[index + 1] if index + 1 < len(blocks) else None
+        between = (
+            previous is not None
+            and following is not None
+            and previous.role in ("formula", "figure")
+            and following.role in ("formula", "figure")
+            and previous.page == block.page == following.page
+        )
+        fragment = (
+            block.role is None
+            and block.rows is None
+            and not block.footnote
+            and len(block.text.split()) <= config.FIGURE_FREE_LABEL_WORDS
+            and not _ends_sentence(block.text)
+        )
+        both_formula = (
+            previous is not None
+            and previous.role == block.role == "formula"
+            and previous.page == block.page
+        )
+        if previous is not None and ((between and fragment) or both_formula):
+            previous.text = f"{previous.text} {' '.join(block.text.split())}"
+            continue
+        out.append(block)
+    return out
 
 
 def _mark_figure_text(blocks: list[RawBlock], regions: list[BBox]) -> None:
@@ -527,11 +650,15 @@ def _mark_figure_text(blocks: list[RawBlock], regions: list[BBox]) -> None:
                     block.in_figure = True
 
 
-def figure_regions(rects: list[BBox], page_box: BBox, body_size: float) -> list[BBox]:
+def figure_regions(
+    rects: list[BBox], page_box: BBox, body_size: float, lines: Sequence[Line] = ()
+) -> list[BBox]:
     """Group drawing and image rectangles into figure regions.
 
-    Thin rules (underlines, table borders) and page-size frames are ignored; drawings closer
-    than a couple of font sizes belong together.
+    Thin rules (underlines, table borders), page-size frames and line shading (a rectangle
+    about one line tall behind a single row of text, a common Word-export artifact) are
+    ignored; drawings closer than a couple of font sizes belong together. A region holding
+    mostly running text is a shaded or framed text area, not a figure.
     """
     width, height = page_box[2] - page_box[0], page_box[3] - page_box[1]
     gap = config.FIGURE_MERGE_GAP * body_size
@@ -542,6 +669,7 @@ def figure_regions(rects: list[BBox], page_box: BBox, body_size: float) -> list[
             if r[2] - r[0] >= 2
             and r[3] - r[1] >= 2
             and (r[2] - r[0]) * (r[3] - r[1]) < 0.5 * width * height
+            and not _is_shading(r, lines, body_size)
         ),
         key=lambda r: r[1],
     )
@@ -582,4 +710,30 @@ def figure_regions(rects: list[BBox], page_box: BBox, body_size: float) -> list[
                     break
             if merged:
                 break
-    return [(r[0], r[1], r[2], r[3]) for r in regions]
+    boxes = [(r[0], r[1], r[2], r[3]) for r in regions]
+    return [box for box in boxes if not _holds_running_text(box, lines, body_size)]
+
+
+def _is_shading(rect: BBox, lines: Sequence[Line], body_size: float) -> bool:
+    """A filled band about one line tall behind one row of text."""
+    size = body_size or 10.0
+    if rect[3] - rect[1] > config.SHADING_MAX_HEIGHT * size:
+        return False
+    tops = [line.bbox[1] for line in lines if _center_in(line.bbox, rect)]
+    return bool(tops) and max(tops) - min(tops) < 0.5 * size
+
+
+def _holds_running_text(region: BBox, lines: Sequence[Line], body_size: float) -> bool:
+    """Most lines inside are long lines of body text: a shaded or framed text area."""
+    inside = [line for line in lines if _center_in(line.bbox, region)]
+    if len(inside) < config.MIN_COLUMN_LINES:
+        return False
+    width = region[2] - region[0]
+    running = sum(
+        1
+        for line in inside
+        if _is_body(line, body_size)
+        and line.bbox[2] - line.bbox[0] >= config.FULL_LINE_SHARE * width
+        and len(line.text.split()) >= config.FIGURE_FREE_LABEL_WORDS + 1
+    )
+    return running >= config.FIGURE_TEXT_SHARE * len(inside)

@@ -31,3 +31,17 @@
 - Short blocks take their neighbours' language; tiny chunks merged; headings never alone.
 - All thresholds and word lists in `config.py`; cleanup counts and heading sources in
   `document.metadata.extra`.
+- Structure: outline entries (chapter plans) become lists; heading vetoes for formulas,
+  captions (`role="caption"`), text inside tables or labelled drawings, run-in titles and
+  ":" labels; levels from the look of numbered headings, rival chapter words share a level,
+  restarting numbers nest, no level gaps; wrapped titles joined; recurring heading text gets
+  one decision.
+- PDF: line shading is not a figure; justified lines stored word by word, inline formula
+  pieces and lone list markers are rejoined; formula and chart fragments become
+  `role="formula"` blocks; tables grow over merged rows closed by their ruling; several
+  contents sections per book with their titles; title from the title page; thread-safe
+  (PyMuPDF work serialised under a lock).
+- DOCX: bold standalone paragraphs, `w:outlineLvl` and `w:keepNext` give subheadings; Word
+  list numbering kept ("1.", "a)", "•"); leading centred bold lines become the title.
+- Chunking: lead-ins stay with their lists, overlap never opens with orphan list items;
+  title page, contents and back matter stay out of chunk text.
