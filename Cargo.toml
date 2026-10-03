@@ -1,0 +1,19 @@
+[package]
+name = "uzru-parser-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust core of uzru-parser: deterministic text processing for Russian and Uzbek."
+
+[lib]
+name = "_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = "0.26"
+unicode-normalization = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
