@@ -113,6 +113,9 @@ TITLE_MATCH_SHARE = 0.6
 #: than a title has. Long titles without a full stop stay titles.
 MAX_TITLE_WORDS = 8
 MAX_KEYWORD_MARKER_WORDS = 3
+#: A short line in capitals ending with ".", ":" or ";" right after a paragraph that stops
+#: mid-sentence is that sentence's end, not a heading.
+MAX_SENTENCE_TAIL_WORDS = 6
 #: Text inside a quotation (an amended law quoting new articles) holds no headings of the
 #: document; a quotation still open after this many blocks is treated as a stray mark.
 MAX_QUOTED_BLOCKS = 300

@@ -51,7 +51,7 @@ def parse_docx(path: str | Path) -> Document:
         path,
         "docx",
         pages,
-        build_blocks(raw_blocks, compounds=compounds, stats=stats),
+        build_blocks(raw_blocks, compounds=compounds, stats=stats, page_layout=False),
         title=properties.title,
         author=properties.author,
         extra={"pages_approximate": True, **stats.as_dict()},

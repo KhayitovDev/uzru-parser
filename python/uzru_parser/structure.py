@@ -29,10 +29,12 @@ QUOTE_MARK = re.compile("[“”„«»]")
 #: End of a possible "5-modda." / "Статья 5." marker: a full stop followed by text.
 MARKER_END = re.compile(r"\.\s+(?=\S)")
 LEADING_NUMBER = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,3})*)")
-LEADING_ROMAN = re.compile(r"^\s*([IVXLC]{1,6})\b")
+LEADING_ROMAN = re.compile(r"^\s*([IVXLC\u0406\u0425]{1,6})\b")
 TOC_ENTRY = re.compile(r"^(?P<title>.*?)(?:\s*(?:…|\.{3,}))?\s*(?P<page>\d{1,4})?\s*$")
 REAL_WORD = re.compile(r"[^\W\d_]{3,}")
-ROMAN = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100}
+#: "IV. Title": a section number, never a list item.
+ROMAN_SECTION = re.compile(r"^\s*[IVXLC\u0406\u0425]{1,6}\.\s")
+ROMAN = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "\u0406": 1, "\u0425": 10}
 
 Repair = Callable[[str], str]
 
@@ -96,11 +98,13 @@ def build_blocks(
     compounds: Iterable[str] = (),
     stats: CleanStats | None = None,
     text_is_clean: bool = False,
+    page_layout: bool = True,
 ) -> list[Block]:
     """Classify raw blocks into headings, lists, tables, footnotes and paragraphs.
 
     ``text_is_clean`` says the reader already cleaned and hyphen-repaired block text (PDF);
-    table cells are always cleaned here.
+    table cells are always cleaned here. Without ``page_layout`` (DOCX) a sentence broken
+    over two paragraphs is joined again, not only one broken by a page break.
     """
     repair = Hyphenator(sorted(compounds)).repair
     titles = _TitleIndex(outline or [], raw_blocks)
@@ -137,7 +141,7 @@ def build_blocks(
         previous = raw
     for block in {id(b): b for b in extended}.values():  # first item alone decided it
         block.language = detect_language(block.text)
-    blocks = _join_split_paragraphs(blocks, repair)
+    blocks = _join_split_paragraphs(blocks, repair, page_layout)
     _inherit_short_languages(blocks)
     return blocks
 
@@ -277,7 +281,7 @@ def _list_items(text: str, forced: bool) -> list[str]:
         return [_flatten(text)]
     items: list[str] = []
     for line in text.split("\n"):
-        if _is_item_marker(numbering_info(line)):
+        if _is_item_marker(numbering_info(line)) and not ROMAN_SECTION.match(line):
             items.append(line.strip())
         elif items:
             items[-1] = f"{items[-1]} {line.strip()}"
@@ -811,12 +815,12 @@ def _continues_heading(heading: Block, heading_raw: RawBlock, raw: RawBlock, tex
 # --- Joining across pages, language of short blocks ----------------------------------------
 
 
-def _join_split_paragraphs(blocks: list[Block], repair: Repair) -> list[Block]:
+def _join_split_paragraphs(blocks: list[Block], repair: Repair, page_layout: bool) -> list[Block]:
     """Merge a paragraph that a page break (or an in-between footnote) split in two."""
     joined: list[Block] = []
     for block in blocks:
         flow = next((b for b in reversed(joined) if b.type is not BlockType.FOOTNOTE), None)
-        if flow is not None and _is_continuation(flow, block):
+        if flow is not None and _is_continuation(flow, block, page_layout):
             _merge_into(flow, block, repair)
         else:
             joined.append(block)
@@ -836,18 +840,39 @@ def _merge_into(previous: Block, block: Block, repair: Repair) -> None:
     previous.language = detect_language(previous.text)
 
 
-def _is_continuation(previous: Block, block: Block) -> bool:
+def _is_continuation(previous: Block, block: Block, page_layout: bool) -> bool:
+    """``block`` goes on with the sentence ``previous`` leaves open, across a page break or,
+    in a source without page layout (DOCX made by OCR), across a paragraph break."""
     if previous.type not in (BlockType.PARAGRAPH, BlockType.LIST):
         return False
-    if block.type is not BlockType.PARAGRAPH:
+    tail = _is_sentence_tail(previous, block)
+    if block.type is not BlockType.PARAGRAPH and not tail:
         return False
     if previous.extra.get("role") or block.extra.get("role") or not block.text:
         return False
-    next_page = previous.extra.get("page_end", previous.page) + 1
+    last_page = previous.extra.get("page_end", previous.page)
+    same_flow = not page_layout and block.page == last_page
+    if block.page != last_page + 1 and not same_flow:
+        return False
+    last = previous.text[-1]
+    # A page break may fall anywhere; a paragraph break only inside an unfinished sentence.
+    open_sentence = (last.isalpha() or last in ",-") if same_flow else last not in SENTENCE_END
+    return tail or (open_sentence and block.text[0].islower())
+
+
+def _is_sentence_tail(previous: Block, block: Block) -> bool:
+    """A short line in capitals ending the sentence ``previous`` leaves unfinished, e.g.
+    "основные" + "ПОНЯТИЯ:" (OCR sets a paragraph's last line in capitals)."""
+    if block.type not in (BlockType.PARAGRAPH, BlockType.HEADING):
+        return False
+    if block.type is BlockType.HEADING and block.extra.get("heading_source") != "font":
+        return False
+    text = block.text
     return (
-        block.page == next_page
-        and block.text[0].islower()
-        and previous.text[-1] not in SENTENCE_END
+        previous.text[-1].isalpha()
+        and text[-1] in ".:;"
+        and len(text.split()) <= config.MAX_SENTENCE_TAIL_WORDS
+        and _uppercase(text)
     )
 
 
