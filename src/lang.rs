@@ -1,8 +1,13 @@
 //! Lightweight language/script detection for Russian and Uzbek (Latin + Cyrillic).
 //!
-//! No model: each word is classified as Russian, Uzbek or neutral using
-//! script-specific letters and small stop-word lists. The document label comes from
-//! the share of classified words.
+//! No model: each word votes Russian, Uzbek or neutral using script-specific letters and
+//! small stop-word lists. The label comes from the share of voting words.
+
+use std::collections::HashSet;
+use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::OnceLock;
+
+use crate::chars::is_apostrophe;
 
 pub struct Detection {
     pub language: &'static str,
@@ -10,223 +15,224 @@ pub struct Detection {
     pub confidence: f64,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Vote {
     Ru,
     Uz,
     Neutral,
 }
 
-const UZ_CYRL_LETTERS: &[char] = &['ў', 'қ', 'ғ', 'ҳ', 'Ў', 'Қ', 'Ғ', 'Ҳ'];
-const RU_ONLY_LETTERS: &[char] = &['ы', 'э', 'щ', 'ё', 'Ы', 'Э', 'Щ', 'Ё'];
+const RU_WORDS: &str = "и в не на что это как по для от из или при если который также может быть \
+    настоящий договор стороны статья после все его они без под над между является должен должны";
 
-const RU_WORDS: &[&str] = &[
-    "и",
-    "в",
-    "не",
-    "на",
-    "что",
-    "это",
-    "как",
-    "по",
-    "для",
-    "от",
-    "из",
-    "или",
-    "при",
-    "если",
-    "который",
-    "также",
-    "может",
-    "быть",
-    "настоящий",
-    "договор",
-    "стороны",
-    "статья",
-    "после",
-    "все",
-    "его",
-    "они",
-    "они",
-    "без",
-    "под",
-    "над",
-    "между",
-    "является",
-    "должен",
-    "должны",
-];
+/// Uzbek stop words, Cyrillic and Latin (Latin forms are stored without apostrophes).
+const UZ_WORDS: &str = "ва учун билан бу ёки ҳамда бўйича эса бўлган керак мумкин лозим тартиби \
+    қоидалар ушбу каби ҳақида томонидан \
+    va uchun bilan bu yoki hamda boyicha esa bolgan kerak mumkin lozim tartibi qoidalar ushbu \
+    kabi haqida tomonidan umumiy xizmat respublikasi";
 
-const UZ_CYRL_WORDS: &[&str] = &[
-    "ва",
-    "учун",
-    "билан",
-    "бу",
-    "ёки",
-    "ҳамда",
-    "бўйича",
-    "эса",
-    "бўлган",
-    "керак",
-    "мумкин",
-    "лозим",
-    "тартиби",
-    "қоидалар",
-    "ушбу",
-    "каби",
-    "ҳақида",
-    "томонидан",
-];
+/// Word endings that mark Uzbek Latin text (checked on words of at least `MIN_SUFFIX_WORD`).
+const UZ_SUFFIXES: &[&str] = &["dagi", "ligi", "lik", "larni", "larga", "lardan", "larning"];
+const MIN_SUFFIX_WORD: usize = 6;
 
-const UZ_LATN_WORDS: &[&str] = &[
-    "va",
-    "uchun",
-    "bilan",
-    "bu",
-    "yoki",
-    "hamda",
-    "boyicha",
-    "esa",
-    "bolgan",
-    "kerak",
-    "mumkin",
-    "lozim",
-    "tartibi",
-    "qoidalar",
-    "ushbu",
-    "kabi",
-    "haqida",
-    "tomonidan",
-    "umumiy",
-    "xizmat",
-    "respublikasi",
-    "bo\u{02BB}yicha",
-    "bo\u{02BB}lgan",
-];
+/// Below this share of marker words (in texts of at least `MIN_WORDS_FOR_COVERAGE` words)
+/// the markers are coincidences, e.g. a few Uzbek-looking words in English text.
+const MIN_COVERAGE: f64 = 0.05;
+const MIN_WORDS_FOR_COVERAGE: usize = 20;
+
+/// A Latin word that looks Uzbek: "q" not followed by "u" (qoida, huquq) or a typical ending.
+fn has_uzbek_shape(word: &str) -> bool {
+    let has_lone_q = word
+        .match_indices('q')
+        .any(|(i, _)| !word[i + 1..].starts_with('u'));
+    has_lone_q || (word.len() >= MIN_SUFFIX_WORD && UZ_SUFFIXES.iter().any(|s| word.ends_with(s)))
+}
+
+/// Longest stop word in bytes; longer words skip the lookup entirely.
+const MAX_STOP_WORD_BYTES: usize = 24;
+
+/// FNV-1a: much cheaper than SipHash for the short words looked up here.
+#[derive(Default)]
+struct Fnv(u64);
+
+impl Hasher for Fnv {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let mut hash = if self.0 == 0 {
+            0xcbf2_9ce4_8422_2325
+        } else {
+            self.0
+        };
+        for &b in bytes {
+            hash = (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+        }
+        self.0 = hash;
+    }
+}
+
+type WordSet = HashSet<&'static str, BuildHasherDefault<Fnv>>;
+
+fn word_set(words: &'static str) -> WordSet {
+    words.split_whitespace().collect()
+}
+
+fn ru_words() -> &'static WordSet {
+    static SET: OnceLock<WordSet> = OnceLock::new();
+    SET.get_or_init(|| word_set(RU_WORDS))
+}
+
+fn uz_words() -> &'static WordSet {
+    static SET: OnceLock<WordSet> = OnceLock::new();
+    SET.get_or_init(|| word_set(UZ_WORDS))
+}
+
+fn is_stop_word(set: &WordSet, word: &str) -> bool {
+    word.len() <= MAX_STOP_WORD_BYTES && set.contains(word)
+}
 
 fn is_cyrillic(c: char) -> bool {
     ('\u{0400}'..='\u{04FF}').contains(&c)
 }
 
-fn is_latin(c: char) -> bool {
-    c.is_ascii_alphabetic()
-}
-
-fn strip_apostrophes(word: &str) -> String {
-    word.chars()
-        .filter(|c| {
-            !matches!(
-                c,
-                '\'' | '\u{2019}' | '\u{2018}' | '\u{02BB}' | '\u{02BC}' | '`'
-            )
-        })
-        .collect()
-}
-
-fn has_uzbek_apostrophe_letters(word: &str) -> bool {
-    // oʻ / gʻ style digraphs written with any apostrophe variant.
-    let chars: Vec<char> = word.chars().collect();
-    chars.windows(2).any(|w| {
-        matches!(w[0].to_ascii_lowercase(), 'o' | 'g')
-            && matches!(
-                w[1],
-                '\'' | '\u{2019}' | '\u{2018}' | '\u{02BB}' | '\u{02BC}' | '`'
-            )
-    })
-}
-
-fn classify(word: &str) -> Vote {
-    let lower = word.to_lowercase();
-    if lower.chars().any(|c| UZ_CYRL_LETTERS.contains(&c)) {
-        return Vote::Uz;
+/// `char::is_alphabetic` with a direct answer for ASCII and the Cyrillic block.
+fn is_letter(c: char) -> bool {
+    match c {
+        'a'..='z' | 'A'..='Z' => true,
+        '\u{0482}'..='\u{0489}' => false,
+        '\u{0400}'..='\u{04FF}' => true,
+        _ if c.is_ascii() => false,
+        _ => c.is_alphabetic(),
     }
-    if lower.chars().any(|c| RU_ONLY_LETTERS.contains(&c)) {
-        return Vote::Ru;
+}
+
+fn is_word_char(c: char) -> bool {
+    is_letter(c) || is_apostrophe(c)
+}
+
+/// Lowercase of one char; arithmetic for the common Cyrillic ranges, `std` for the rest.
+fn lowercase(c: char) -> char {
+    let code = c as u32;
+    let shift = match code {
+        0x0410..=0x042F => 0x20,
+        0x0400..=0x040F => 0x50,
+        0x0460..=0x0481 | 0x048A..=0x04BF | 0x04D0..=0x04FF if code.is_multiple_of(2) => 1,
+        _ => return c.to_lowercase().next().unwrap_or(c),
+    };
+    char::from_u32(code + shift).unwrap_or(c)
+}
+
+/// Classify one word. `bare` is a reusable buffer for its lowercase form without apostrophes.
+fn classify(word: &str, bare: &mut String) -> Vote {
+    bare.clear();
+    let (mut cyrillic, mut latin, mut uz_digraph) = (false, false, false);
+    let mut prev_og = false;
+    for c in word.chars() {
+        if is_apostrophe(c) {
+            uz_digraph |= prev_og;
+            prev_og = false;
+            continue;
+        }
+        let lower = lowercase(c);
+        bare.push(lower);
+        match lower {
+            'ў' | 'қ' | 'ғ' | 'ҳ' => return Vote::Uz,
+            'ы' | 'э' | 'щ' | 'ё' => return Vote::Ru,
+            _ => {}
+        }
+        cyrillic |= is_cyrillic(lower);
+        latin |= lower.is_ascii_alphabetic();
+        prev_og = matches!(lower, 'o' | 'g');
     }
-    if lower.chars().any(is_cyrillic) {
-        if RU_WORDS.contains(&lower.as_str()) {
+    if cyrillic {
+        if is_stop_word(ru_words(), bare) {
             return Vote::Ru;
         }
-        if UZ_CYRL_WORDS.contains(&lower.as_str()) {
+        if is_stop_word(uz_words(), bare) {
             return Vote::Uz;
         }
-        return Vote::Neutral;
-    }
-    if lower.chars().any(is_latin) {
-        if has_uzbek_apostrophe_letters(&lower) {
-            return Vote::Uz;
-        }
-        let bare = strip_apostrophes(&lower);
-        if UZ_LATN_WORDS.contains(&lower.as_str()) || UZ_LATN_WORDS.contains(&bare.as_str()) {
-            return Vote::Uz;
-        }
+    } else if latin && (uz_digraph || is_stop_word(uz_words(), bare) || has_uzbek_shape(bare)) {
+        return Vote::Uz;
     }
     Vote::Neutral
 }
 
-pub fn detect(text: &str) -> Detection {
-    let (mut cyr, mut lat) = (0usize, 0usize);
+fn script_of(text: &str) -> Option<&'static str> {
+    let (mut cyrillic, mut latin) = (0usize, 0usize);
     for c in text.chars() {
         if is_cyrillic(c) {
-            cyr += 1;
-        } else if is_latin(c) {
-            lat += 1;
+            cyrillic += 1;
+        } else if c.is_ascii_alphabetic() {
+            latin += 1;
         }
     }
-    let total = cyr + lat;
+    let total = cyrillic + latin;
     if total == 0 {
+        return None;
+    }
+    let share = cyrillic as f64 / total as f64;
+    Some(if share >= 0.9 {
+        "cyrillic"
+    } else if share <= 0.1 {
+        "latin"
+    } else {
+        "mixed"
+    })
+}
+
+pub fn detect(text: &str) -> Detection {
+    let Some(script) = script_of(text) else {
         return Detection {
             language: "unknown",
             script: "none",
             confidence: 0.0,
         };
-    }
-    let cyr_share = cyr as f64 / total as f64;
-    let script = if cyr_share >= 0.9 {
-        "cyrillic"
-    } else if cyr_share <= 0.1 {
-        "latin"
-    } else {
-        "mixed"
     };
 
     let (mut ru, mut uz, mut words) = (0usize, 0usize, 0usize);
-    for w in text.split(|c: char| {
-        !(c.is_alphabetic()
-            || matches!(
-                c,
-                '\'' | '\u{2019}' | '\u{2018}' | '\u{02BB}' | '\u{02BC}' | '`'
-            ))
-    }) {
-        if w.is_empty() {
-            continue;
-        }
+    let mut bare = String::new();
+    for word in text
+        .split(|c: char| !is_word_char(c))
+        .filter(|w| !w.is_empty())
+    {
         words += 1;
-        match classify(w) {
+        match classify(word, &mut bare) {
             Vote::Ru => ru += 1,
             Vote::Uz => uz += 1,
             Vote::Neutral => {}
         }
     }
-    let classified = ru + uz;
 
-    let (language, confidence) = if classified == 0 {
-        // No markers. Plain Cyrillic is most likely Russian, but with low confidence.
-        if script == "cyrillic" {
-            ("ru", 0.3)
+    let voters = ru + uz;
+    let sparse = words >= MIN_WORDS_FOR_COVERAGE && (voters as f64) < MIN_COVERAGE * words as f64;
+    if voters == 0 || sparse {
+        // No markers: plain Cyrillic is most likely Russian, but with low confidence.
+        return if script == "cyrillic" {
+            Detection {
+                language: "ru",
+                script,
+                confidence: 0.3,
+            }
         } else {
-            ("unknown", 0.0)
-        }
+            Detection {
+                language: "unknown",
+                script,
+                confidence: 0.0,
+            }
+        };
+    }
+
+    let (ru_share, uz_share) = (ru as f64 / voters as f64, uz as f64 / voters as f64);
+    let coverage = voters as f64 / words.max(1) as f64;
+    let weight = 0.5 + 0.5 * coverage;
+    let (language, confidence) = if ru_share >= 0.2 && uz_share >= 0.2 {
+        ("mixed", 1.0 - (ru_share - uz_share).abs())
+    } else if uz_share > ru_share {
+        ("uz", uz_share * weight)
     } else {
-        let (ru_f, uz_f) = (ru as f64 / classified as f64, uz as f64 / classified as f64);
-        let coverage = (classified as f64 / words.max(1) as f64).min(1.0);
-        if ru_f >= 0.2 && uz_f >= 0.2 {
-            ("mixed", 1.0 - (ru_f - uz_f).abs())
-        } else if uz_f > ru_f {
-            ("uz", uz_f * (0.5 + 0.5 * coverage))
-        } else {
-            ("ru", ru_f * (0.5 + 0.5 * coverage))
-        }
+        ("ru", ru_share * weight)
     };
     Detection {
         language,
@@ -239,31 +245,94 @@ pub fn detect(text: &str) -> Detection {
 mod tests {
     use super::*;
 
+    fn labels(text: &str) -> (&'static str, &'static str) {
+        let d = detect(text);
+        (d.language, d.script)
+    }
+
     #[test]
     fn russian() {
-        let d = detect("Настоящий договор является основанием для оказания услуг.");
-        assert_eq!((d.language, d.script), ("ru", "cyrillic"));
+        assert_eq!(
+            labels("Настоящий договор является основанием для оказания услуг."),
+            ("ru", "cyrillic")
+        );
     }
 
     #[test]
     fn uzbek_latin() {
-        let d = detect("Ushbu qoidalar xizmat ko'rsatish tartibi va ma'lumot uchun.");
-        assert_eq!((d.language, d.script), ("uz", "latin"));
+        assert_eq!(
+            labels("Ushbu qoidalar xizmat ko'rsatish tartibi va ma'lumot uchun."),
+            ("uz", "latin")
+        );
     }
 
     #[test]
     fn uzbek_cyrillic() {
-        let d = detect("Ўзбекистон Республикаси ўқувчилар учун ғамхўрлик ва маълумот.");
-        assert_eq!((d.language, d.script), ("uz", "cyrillic"));
+        assert_eq!(
+            labels("Ўзбекистон Республикаси ўқувчилар учун ғамхўрлик ва маълумот."),
+            ("uz", "cyrillic")
+        );
     }
 
     #[test]
     fn mixed_and_unknown() {
-        let d = detect(
-            "Настоящий договор является основанием. Ushbu qoidalar xizmat tartibi va bilan.",
+        assert_eq!(
+            labels(
+                "Настоящий договор является основанием. Ushbu qoidalar xizmat tartibi va bilan."
+            )
+            .0,
+            "mixed"
         );
-        assert_eq!(d.language, "mixed");
-        let d = detect("12345 ---");
-        assert_eq!((d.language, d.script), ("unknown", "none"));
+        assert_eq!(labels("12345 ---"), ("unknown", "none"));
+    }
+
+    #[test]
+    fn apostrophe_variants_mark_uzbek_latin() {
+        for apostrophe in ["'", "’", "ʻ", "ʼ", "`"] {
+            assert_eq!(
+                labels(&format!("o{apostrophe}zbek g{apostrophe}or")).0,
+                "uz"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_paths_match_std_over_the_cyrillic_block() {
+        for code in 0x0400..=0x04FF {
+            let c = char::from_u32(code).unwrap();
+            assert_eq!(is_letter(c), c.is_alphabetic(), "is_letter U+{code:04X}");
+            assert_eq!(
+                lowercase(c),
+                c.to_lowercase().next().unwrap(),
+                "lowercase U+{code:04X}"
+            );
+        }
+    }
+
+    #[test]
+    fn short_uzbek_latin_phrases_are_recognized() {
+        for text in [
+            "mehnat sohasidagi ijtimoiy sheriklik;",
+            "Oldingi tahrirga qarang.",
+            "huquqlar",
+        ] {
+            assert_eq!(labels(text), ("uz", "latin"), "{text}");
+        }
+        assert_eq!(labels("Quality quote request").0, "unknown");
+    }
+
+    #[test]
+    fn english_text_is_not_labeled_uzbek() {
+        let english = "Circular imports and meaning reasoning about modules. \
+            Python uses reference counting for memory management, which is not thread-safe. \
+            Threads share memory and are lightweight, but are limited by the interpreter lock.";
+        assert_eq!(labels(english), ("unknown", "latin"));
+    }
+
+    #[test]
+    fn plain_cyrillic_defaults_to_russian_with_low_confidence() {
+        let d = detect("Москва Петербург");
+        assert_eq!(d.language, "ru");
+        assert!(d.confidence < 0.5);
     }
 }

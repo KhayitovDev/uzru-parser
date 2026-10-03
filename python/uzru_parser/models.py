@@ -55,6 +55,7 @@ class Page:
     width: float = 0.0
     height: float = 0.0
     block_count: int = 0
+    needs_ocr: bool = False
 
 
 @dataclass
@@ -74,6 +75,11 @@ class Document:
     blocks: list[Block]
     language: LanguageInfo = field(default_factory=LanguageInfo)
     document_id: str = ""
+
+    @property
+    def needs_ocr(self) -> bool:
+        """True when some page has images but (almost) no extractable text."""
+        return any(page.needs_ocr for page in self.pages)
 
     @property
     def text(self) -> str:

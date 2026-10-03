@@ -2,34 +2,8 @@ from pathlib import Path
 
 import pymupdf
 import pytest
-from uzru_parser import BlockType, Parser, parse
-
-FONT_CANDIDATES = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-    "/Library/Fonts/Arial Unicode.ttf",
-    "C:/Windows/Fonts/arial.ttf",
-]
-
-
-def cyrillic_font() -> str:
-    """PyMuPDF's built-in fonts have no Cyrillic, so tests borrow a system font."""
-    for candidate in FONT_CANDIDATES:
-        if Path(candidate).exists():
-            return candidate
-    pytest.skip("no Cyrillic-capable system font found for generating test PDFs")
-
-
-def make_pdf(path: Path, pages: list[str]) -> Path:
-    """Create a small text PDF containing Cyrillic/Latin text."""
-    doc = pymupdf.open()
-    for text in pages:
-        page = doc.new_page()
-        page.insert_font(fontname="test", fontfile=cyrillic_font())
-        page.insert_textbox(pymupdf.Rect(72, 72, 523, 770), text, fontname="test", fontsize=11)
-    doc.save(path)
-    doc.close()
-    return path
+from helpers import cyrillic_font, make_pdf
+from uzru_parser import BlockType, Parser, chunk, parse
 
 
 @pytest.fixture
@@ -88,3 +62,112 @@ def test_pdf_line_wrap_hyphenation(tmp_path: Path) -> None:
 def test_unsupported_extension(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         parse(tmp_path / "file.xyz")
+
+
+def test_headings_lists_and_chunks_from_pdf(tmp_path: Path) -> None:
+    regular, bold = (
+        cyrillic_font(),
+        cyrillic_font().replace("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"),
+    )
+    if not Path(bold).exists():
+        pytest.skip("bold font not available")
+    pdf_path = tmp_path / "structured.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_font(fontname="regular", fontfile=regular)
+    page.insert_font(fontname="bold", fontfile=bold)
+    page.insert_text((72, 80), "1. ОБЩИЕ ПОЛОЖЕНИЯ", fontname="bold", fontsize=14)
+    page.insert_textbox(
+        pymupdf.Rect(72, 100, 523, 200),
+        "Настоящий договор является основанием для оказания услуг по договору.",
+        fontname="regular",
+        fontsize=11,
+    )
+    page.insert_text((72, 220), "1.1. Основные понятия", fontname="bold", fontsize=11)
+    page.insert_text((72, 240), "• первый пункт списка", fontname="regular", fontsize=11)
+    page.insert_text((72, 255), "• второй пункт списка", fontname="regular", fontsize=11)
+    doc.save(pdf_path)
+    doc.close()
+
+    document = parse(pdf_path)
+    assert [b.type for b in document.blocks] == [
+        BlockType.HEADING,
+        BlockType.PARAGRAPH,
+        BlockType.HEADING,
+        BlockType.LIST,
+    ]
+    assert [b.level for b in document.blocks if b.type is BlockType.HEADING] == [1, 2]
+    chunks = chunk(document)
+    assert chunks[-1].heading_path == ["1. ОБЩИЕ ПОЛОЖЕНИЯ", "1.1. Основные понятия"]
+
+
+def test_repeated_headers_footers_and_page_numbers_removed(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "furniture.pdf"
+    doc = pymupdf.open()
+    for number in range(1, 4):
+        page = doc.new_page()
+        page.insert_font(fontname="test", fontfile=cyrillic_font())
+        page.insert_text((72, 40), "ДОГОВОР № 15 об оказании услуг", fontname="test", fontsize=9)
+        page.insert_textbox(
+            pymupdf.Rect(72, 100, 523, 300),
+            f"Уникальный текст страницы номер {number}.",
+            fontname="test",
+            fontsize=11,
+        )
+        page.insert_text((290, 810), f"Стр. {number}", fontname="test", fontsize=9)
+    doc.save(pdf_path)
+    doc.close()
+
+    document = parse(pdf_path)
+    assert [b.text for b in document.blocks] == [
+        f"Уникальный текст страницы номер {n}." for n in range(1, 4)
+    ]
+    assert document.metadata.extra["removed_page_furniture"] == 6
+
+
+def test_ruled_table_extracted(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "table.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_font(fontname="test", fontfile=cyrillic_font())
+    page.insert_text((72, 60), "Перед таблицей", fontname="test", fontsize=11)
+    cells = [["Услуга", "Цена"], ["Хлеб", "100"], ["Молоко", "250"]]
+    for r, row in enumerate(cells):
+        for c, value in enumerate(row):
+            rect = pymupdf.Rect(72 + c * 150, 100 + r * 30, 222 + c * 150, 130 + r * 30)
+            page.draw_rect(rect, color=(0, 0, 0), width=1)
+            page.insert_text((rect.x0 + 5, rect.y0 + 20), value, fontname="test", fontsize=11)
+    page.insert_text((72, 260), "После таблицы", fontname="test", fontsize=11)
+    doc.save(pdf_path)
+    doc.close()
+
+    document = parse(pdf_path)
+    assert [b.type for b in document.blocks] == [
+        BlockType.PARAGRAPH,
+        BlockType.TABLE,
+        BlockType.PARAGRAPH,
+    ]
+    assert document.blocks[1].extra["rows"] == cells
+    assert document.blocks[1].text == "Услуга | Цена\nХлеб | 100\nМолоко | 250"
+    assert all(
+        b.type is not BlockType.TABLE for b in Parser(detect_tables=False).parse(pdf_path).blocks
+    )
+
+
+def test_scanned_page_flagged_for_ocr(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "scan.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 60), False)
+    pixmap.clear_with(200)
+    page.insert_image(page.rect, pixmap=pixmap)
+    doc.save(pdf_path)
+    doc.close()
+
+    document = parse(pdf_path)
+    assert document.pages[0].needs_ocr
+    assert document.needs_ocr
+
+
+def test_text_pdf_not_flagged_for_ocr(russian_pdf: Path) -> None:
+    assert not parse(russian_pdf).needs_ocr

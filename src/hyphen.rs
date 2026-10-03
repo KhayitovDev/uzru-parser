@@ -12,29 +12,11 @@
 //! lowercase letter, so "Москва-\nГород" and "пункт 1-\n2" are never touched.
 
 /// Left pieces that form hyphenated words with almost anything that follows.
-const KEEP_LEFT: &[&str] = &[
-    "кое",
-    "кто",
-    "что",
-    "как",
-    "где",
-    "куда",
-    "когда",
-    "какой",
-    "чей",
-    "северо",
-    "юго",
-    "восточно",
-    "западно",
-    "вице",
-    "штаб",
-    "унтер",
-    "обер",
-    "лейб",
-];
+const KEEP_LEFT: &str = "кое кто что как где куда когда какой чей северо юго восточно западно \
+    вице штаб унтер обер лейб";
 
 /// Right pieces that are standalone particles.
-const KEEP_RIGHT: &[&str] = &["то", "либо", "нибудь", "таки"];
+const KEEP_RIGHT: &str = "то либо нибудь таки";
 
 /// Exact (left, right) pairs of fixed hyphenated words.
 const KEEP_PAIRS: &[(&str, &str)] = &[
@@ -66,11 +48,25 @@ fn last_word(s: &str) -> &str {
     &s[start..]
 }
 
+fn in_list(list: &str, word: &str) -> bool {
+    list.split_whitespace().any(|w| w == word)
+}
+
+/// Endings of the "по-…" adverbs: по-русски, по-моему, по-другому.
+const PO_ENDINGS: &[&str] = &["ски", "ому", "ему"];
+
+fn is_acronym(word: &str) -> bool {
+    word.chars().count() >= 2 && word.chars().all(char::is_uppercase)
+}
+
 fn keep_hyphen(left: &str, right: &str) -> bool {
-    let l = last_word(left).to_lowercase();
+    let left_word = last_word(left);
+    let l = left_word.to_lowercase();
     let r = first_word(right).to_lowercase();
-    KEEP_LEFT.contains(&l.as_str())
-        || KEEP_RIGHT.contains(&r.as_str())
+    is_acronym(left_word)
+        || (l == "по" && PO_ENDINGS.iter().any(|e| r.ends_with(e)))
+        || in_list(KEEP_LEFT, &l)
+        || in_list(KEEP_RIGHT, &r)
         || KEEP_PAIRS.contains(&(l.as_str(), r.as_str()))
 }
 
@@ -134,6 +130,13 @@ mod tests {
         assert_eq!(repair_hyphenation("северо-\nзападный"), "северо-\nзападный");
         assert_eq!(repair_hyphenation("во-\nпервых"), "во-\nпервых");
         assert_eq!(repair_hyphenation("Москва-\nГород"), "Москва-\nГород");
+    }
+
+    #[test]
+    fn keeps_po_adverbs_and_acronym_suffixes() {
+        assert_eq!(repair_hyphenation("по-\nрусски"), "по-\nрусски");
+        assert_eq!(repair_hyphenation("по-\nмоему"), "по-\nмоему");
+        assert_eq!(repair_hyphenation("BMT-\nning qarori"), "BMT-\nning qarori");
     }
 
     #[test]

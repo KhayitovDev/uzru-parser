@@ -19,3 +19,12 @@ def test_hyphenation_calls_rust() -> None:
 def test_language_calls_rust() -> None:
     info = detect_language("Настоящий договор является основанием для оказания услуг.")
     assert (info.language, info.script, info.locale) == ("ru", "cyrillic", "ru")
+
+
+def test_english_text_is_not_mistaken_for_uzbek() -> None:
+    english = (
+        "Circular imports and meaning reasoning about modules. "
+        "Python uses reference counting for memory management, which is not thread-safe. "
+        "Threads share memory and are lightweight, but are limited by the interpreter lock."
+    )
+    assert detect_language(english).language == "unknown"

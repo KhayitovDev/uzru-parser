@@ -1,6 +1,7 @@
 """uzru-parser: CPU-first document parsing for Russian and Uzbek."""
 
 from ._core import __version__
+from .chunking import Chunk, Chunker, chunk
 from .models import (
     Block,
     BlockType,
@@ -13,6 +14,8 @@ from .parser import Parser, parse
 
 __all__ = [
     "Block",
+    "Chunk",
+    "Chunker",
     "BlockType",
     "Document",
     "DocumentMetadata",
@@ -20,5 +23,6 @@ __all__ = [
     "Page",
     "Parser",
     "__version__",
+    "chunk",
     "parse",
 ]
