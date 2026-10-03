@@ -11,11 +11,14 @@ mod chars;
 mod confusables;
 mod hyphen;
 mod lang;
+mod langid;
+mod lexicon;
 mod normalize;
 mod numbering;
 mod sentences;
 mod symbols;
 mod tokens;
+mod translit;
 
 /// Normalize text for RAG use (NFC, invisible characters, Uzbek apostrophes, whitespace).
 #[pyfunction]
@@ -97,6 +100,18 @@ fn split_sentences(text: &str) -> Vec<String> {
     sentences::split_sentences(text)
 }
 
+/// Does a sentence end between `left` and `right` (abbreviation- and initial-aware)?
+#[pyfunction]
+fn is_sentence_break(left: &str, right: &str) -> bool {
+    sentences::is_sentence_break(left, right)
+}
+
+/// Is `word` a known Uzbek (Latin or Cyrillic) or Russian word, inflected forms included?
+#[pyfunction]
+fn is_known_word(word: &str) -> bool {
+    lexicon::is_known(word)
+}
+
 /// Estimate the token count of `text` without a tokenizer.
 #[pyfunction]
 fn estimate_tokens(text: &str) -> usize {
@@ -114,6 +129,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(numbering_info, m)?)?;
     m.add_function(wrap_pyfunction!(set_heading_keywords, m)?)?;
     m.add_function(wrap_pyfunction!(split_sentences, m)?)?;
+    m.add_function(wrap_pyfunction!(is_sentence_break, m)?)?;
+    m.add_function(wrap_pyfunction!(is_known_word, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_tokens, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

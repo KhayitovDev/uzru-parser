@@ -18,6 +18,7 @@ import pymupdf
 
 from . import config
 from .assemble import assemble_document
+from .columns import reading_regions
 from .layout import mark_footnotes, mark_title_page, mark_toc, strip_page_furniture
 from .models import Document, Page
 from .paragraphs import BBox, Line, build_paragraphs, figure_regions, layout_stats
@@ -42,6 +43,7 @@ class _PageContent:
     lines: list[Line]
     tables: list[RawBlock]
     drawings: list[BBox]  # vector drawings and images, grouped into figures later
+    boxes: list[BBox]  # filled rectangles that may hold side boxes of text
     page_box: BBox
     needs_ocr: bool
 
@@ -76,7 +78,11 @@ def parse_pdf(path: str | Path, detect_tables: bool = True) -> Document:
     raw_blocks: list[RawBlock] = []
     for content in contents:
         regions = figure_regions(content.drawings, content.page_box, layout.body_size)
-        blocks = build_paragraphs(content.lines, content.number, layout, regions)
+        blocks = [
+            block
+            for part in reading_regions(content.lines, content.boxes, layout.body_size)
+            for block in build_paragraphs(part, content.number, layout, regions)
+        ]
         for block in blocks:
             block.text = hyphenator.repair(block.text)
         raw_blocks.extend(_merge_tables(blocks, content.tables))
@@ -129,6 +135,7 @@ def _read_page(
         lines=lines,
         tables=tables,
         drawings=[tuple(d["rect"]) for d in drawings] + images,
+        boxes=[tuple(d["rect"]) for d in drawings if d.get("fill") is not None],
         page_box=tuple(page.rect),
         needs_ocr=_is_scanned(images, tuple(page.rect), chars),
     )

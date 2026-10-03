@@ -19,9 +19,18 @@ print(chunks[0].heading_path, chunks[0].page_start, chunks[0].text[:80])
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install maturin ruff mypy pymupdf
+pip install maturin pytest ruff mypy pymupdf
 maturin develop --release
+pytest
 cargo test
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
+
+## Licence
+
+The source code is released under the MIT License (`LICENSE`). The bundled data files in
+`src/data/` (language model and word list) are released under CC BY-SA 4.0 because they are
+adapted from CC BY-SA 4.0 corpora (`src/data/LICENSE`). PDF support relies on PyMuPDF, which is
+licensed under AGPL-3.0 or a commercial licence from Artifex. Third-party sources, their
+licences and the required notices are listed in [THIRD_PARTY.md](THIRD_PARTY.md).

@@ -4,6 +4,9 @@
 //! out as private-use characters at `0xF000 + font code` ("\u{F03D}" is code 0x3D "=").
 //! The tables below translate those codes. An empty entry means the glyph has no text
 //! meaning (bracket and arrow extension pieces) and is dropped.
+//!
+//! The Symbol table follows Adobe's Symbol encoding and glyph list (Adobe Glyph List,
+//! Copyright 2002-2019 Adobe, BSD-3-Clause; notice in THIRD_PARTY.md).
 
 /// Which code table a span uses, decided from its font name.
 #[derive(Clone, Copy, Debug, PartialEq)]
