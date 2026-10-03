@@ -1,6 +1,6 @@
 [package]
 name = "uzru-parser-core"
-version = "0.1.0"
+version = "0.1.0-rc4"
 edition = "2021"
 license = "MIT AND CC-BY-SA-4.0 AND Apache-2.0 AND BSD-3-Clause AND Unicode-3.0"
 description = "Rust core of uzru-parser: deterministic text processing for Russian and Uzbek."
