@@ -518,3 +518,100 @@ def test_long_unknown_blocks_keep_their_own_language() -> None:
         plain("Python uses reference counting for memory management in CPython."),
     ]
     assert build_blocks(raw)[1].language.language == "unknown"
+
+
+def test_weak_cyrillic_guess_takes_its_uzbek_neighbours_language() -> None:
+    raw = [
+        plain("Иқтисодиётнинг бошланғич мувозанат ҳолати ва унинг ўзгариши кўрсатилган."),
+        plain("Пул таклифи:"),
+    ]
+    assert [b.language.language for b in build_blocks(raw)] == ["uz", "uz"]
+
+
+def test_weak_guess_does_not_take_a_neighbour_in_another_script() -> None:
+    raw = [
+        plain("Ushbu qoidalar xizmat koʻrsatish tartibini va uchun belgilaydi."),
+        plain("Москва Петербург"),
+    ]
+    language = build_blocks(raw)[1].language
+    assert (language.language, language.script) == ("ru", "cyrillic")
+
+
+def test_list_language_covers_all_its_items() -> None:
+    raw = [
+        plain("1. Quyidagilar:"),
+        plain(
+            "2. Oʻzbekiston Respublikasi Hukumati bilan sheriklik toʻgʻrisidagi bitim tasdiqlansin."
+        ),
+    ]
+    block = build_blocks(raw)[0]
+    assert block.type is BlockType.LIST
+    assert block.language.language == "uz"
+
+
+@pytest.mark.parametrize(
+    ("text", "title", "rest"),
+    [
+        ("4-modda. Oʻzbekiston Respublikasi Vazirlar Mahkamasi:", "4-modda.", "Oʻzbekiston"),
+        (
+            "5-modda. Ushbu Qonun rasmiy eʼlon qilingan kundan eʼtiboran uch oy oʻtgach "
+            "kuchga kiradi.",
+            "5-modda.",
+            "Ushbu Qonun",
+        ),
+        (
+            "Статья 7. Настоящий закон вступает в силу со дня его официального "
+            "опубликования в печати.",
+            "Статья 7.",
+            "Настоящий",
+        ),
+    ],
+)
+def test_untitled_article_is_split_into_heading_and_text(text: str, title: str, rest: str) -> None:
+    blocks = build_blocks([plain(text), plain("Matn davom etadi.")])
+    assert (blocks[0].type, blocks[0].text) == (BlockType.HEADING, title)
+    assert blocks[1].type is BlockType.PARAGRAPH and blocks[1].text.startswith(rest)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1-bob. Umumiy qoidalar",
+        "3-modda. Yakka tartibdagi mehnatga oid munosabatlarni va ular bilan bevosita bogʻliq "
+        "boʻlgan ijtimoiy munosabatlarni huquqiy tartibga solishning asosiy prinsiplari va "
+        "vazifalari hamda mehnat toʻgʻrisidagi qonunchilik hujjatlarining amal qilish doirasi",
+        "Статья 5. Вступление в силу.",
+        "3-MAVZU. PUL MUOMALASI VA UNING QONUNLARI HAMDA ULARNING AMAL QILISH SHARTLARI.",
+    ],
+)
+def test_article_titles_are_not_split(text: str) -> None:
+    blocks = build_blocks([plain(text), plain("Matn davom etadi.")])
+    assert blocks[0].type is BlockType.HEADING
+    assert blocks[0].text == text
+
+
+def test_articles_quoted_by_an_amending_law_are_not_headings() -> None:
+    raw = [
+        plain("2-modda. Qonunga quyidagi oʻzgartirishlar kiritilsin:"),
+        plain("“131-modda. Buyurtmalar agregatori operatorining huquqlari"),
+        plain("Operator xizmat koʻrsatish qoidalarini belgilaydi."),
+        plain("132-modda. Raqamli striming xizmati operatorining majburiyatlari"),
+        plain("Operator kontentni qonunchilikka muvofiq tarqatadi”."),
+        plain("3-modda. Vazirlar Mahkamasi ushbu Qonunning ijrosini taʼminlasin."),
+    ]
+    headings = [b.text for b in build_blocks(raw) if b.type is BlockType.HEADING]
+    assert headings == [
+        "2-modda.",
+        "3-modda. Vazirlar Mahkamasi ushbu Qonunning ijrosini taʼminlasin.",
+    ]
+
+
+def test_quotes_closed_in_the_same_block_or_never_closed_change_nothing() -> None:
+    raw = [
+        plain("“Elektron tijorat toʻgʻrisida”gi Qonun va «Bank» atamasi qoʻllaniladi."),
+        plain("1-bob. Umumiy qoidalar"),
+        plain("Bu yerda “yopilmagan iqtibos boshlanadi."),
+        plain("2-bob. Yakunlovchi qoidalar"),
+    ]
+    headings = [b.text for b in build_blocks(raw) if b.type is BlockType.HEADING]
+    assert headings == ["1-bob. Umumiy qoidalar", "2-bob. Yakunlovchi qoidalar"]
