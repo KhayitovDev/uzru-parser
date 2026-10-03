@@ -230,3 +230,31 @@ def test_contents_with_titles_wrapping_over_several_lines() -> None:
     blocks = [page_block("MUNDARIJA", 236, 80), *wrapped]
     mark_toc(blocks, page_count=240)
     assert all(b.role == "toc" for b in blocks)
+
+
+def test_second_contents_in_another_language_is_marked_too() -> None:
+    blocks = [
+        page_block("MUNDARIJA", 3, 80),
+        *[page_block(f"{n}.1. Boʻlim nomi ……… {n * 10}", 3, 100 + 20 * n) for n in range(1, 5)],
+        page_block("Annotatsiya matni shu yerda.", 4, 100),
+        page_block("CONTENTS", 5, 80),
+        page_block("I. THEORETICAL PRINCIPLES", 5, 95),
+        *[page_block(f"{n}.1. Section title … {n * 10}", 5, 100 + 20 * n) for n in range(1, 5)],
+        page_block("Kirish matni.", 6, 100),
+    ]
+    mark_toc(blocks, page_count=200)
+    assert [b.role for b in blocks] == ["toc"] * 5 + [None] + ["toc"] * 6 + [None]
+
+
+def test_reference_list_after_the_contents_is_not_another_contents() -> None:
+    blocks = [
+        page_block("MUNDARIJA", 3, 80),
+        *[page_block(f"{n}.1. Boʻlim nomi ……… {n * 10}", 3, 100 + 20 * n) for n in range(1, 5)],
+        page_block("Asosiy matn.", 100, 100),
+        *[
+            page_block(f"Muallif {n}. Kitob nomi. T., 2004. {n * 20}", 195, 100 + 20 * n)
+            for n in range(1, 6)
+        ],
+    ]
+    mark_toc(blocks, page_count=200)
+    assert [b.role for b in blocks[-5:]] == [None] * 5

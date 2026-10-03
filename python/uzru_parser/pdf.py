@@ -21,7 +21,14 @@ from .assemble import assemble_document
 from .columns import reading_regions
 from .layout import mark_footnotes, mark_title_page, mark_toc, strip_page_furniture
 from .models import Document, Page
-from .paragraphs import BBox, Line, build_paragraphs, figure_regions, layout_stats
+from .paragraphs import (
+    BBox,
+    Line,
+    build_paragraphs,
+    figure_regions,
+    group_formula_debris,
+    layout_stats,
+)
 from .structure import OutlineEntry, RawBlock, build_blocks
 from .text import CleanStats, Hyphenator, clean, compound_pairs, map_symbol_font
 
@@ -92,6 +99,7 @@ def parse_pdf(path: str | Path, detect_tables: bool = True) -> Document:
     mark_footnotes(raw_blocks, heights, layout.body_size)
     mark_title_page(raw_blocks, len(pages))
     mark_toc(raw_blocks, len(pages))
+    raw_blocks = group_formula_debris(raw_blocks)
     document_blocks = build_blocks(
         raw_blocks, outline=outline, compounds=compounds, stats=stats, text_is_clean=True
     )

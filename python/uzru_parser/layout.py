@@ -151,7 +151,8 @@ def mark_toc(blocks: list[RawBlock], page_count: int) -> None:
 
     A contents page is recognised by its shape: many lines ending in a page number, with or
     without leaders, and page numbers that grow. It must carry a contents title or lie near
-    either end of the book; the following pages with the same shape belong to it.
+    either end of the book; the following pages with the same shape belong to it. A book can
+    have several (one per language).
     """
     by_page: dict[int, list[int]] = defaultdict(list)
     for index, raw in enumerate(blocks):
@@ -159,34 +160,40 @@ def mark_toc(blocks: list[RawBlock], page_count: int) -> None:
             by_page[raw.page].append(index)
     edge = max(1, math.ceil(page_count * config.TOC_EDGE_SHARE))
 
+    runs: list[list[int]] = []  # each run: block indexes of one contents section
     marked: list[int] = []
     previous_page: int | None = None
     for page in sorted(by_page):
         indexes = by_page[page]
         page_blocks = [blocks[i] for i in indexes]
+        continuing = bool(marked) and previous_page is not None and page == previous_page + 1
+        if marked and not continuing:
+            runs.append(marked)  # a run ended; a later contents (another language) may follow
+            marked = []
         min_entries = 1 if marked else config.TOC_MIN_ENTRIES  # the last page may hold few
         shaped, holders = _is_toc_page(page_blocks, page_count, min_entries)
         title_at = next(
             (n for n, raw in enumerate(page_blocks) if _TOC_TITLE.match(raw.text)), None
         )
-        continuing = previous_page is not None and page == previous_page + 1
-        if marked and not continuing:
-            break
         if not shaped:
             if marked:
-                break
+                runs.append(marked)
+                marked = []
             continue
         near_edge = page <= edge or page > page_count - edge
-        if not marked and title_at is None and not near_edge:
+        # A first contents may rely on its position; a further one needs its own title.
+        if not marked and title_at is None and (runs or not near_edge):
             continue
         start = title_at if title_at is not None and not marked else (0 if marked else holders[0])
         marked.extend(indexes[start : holders[-1] + 1] if holders else [])
         previous_page = page
+    if marked:
+        runs.append(marked)
 
-    if not marked:
-        return
-    for index in marked:
-        blocks[index].role = "toc"
-    if blocks[marked[0]].page >= page_count * config.BACK_MATTER_START:
-        for raw in blocks[marked[-1] + 1 :]:
+    for run in runs:
+        for index in run:
+            blocks[index].role = "toc"
+    final = runs[-1] if runs else None
+    if final and blocks[final[0]].page >= page_count * config.BACK_MATTER_START:
+        for raw in blocks[final[-1] + 1 :]:
             raw.role = raw.role or "back_matter"

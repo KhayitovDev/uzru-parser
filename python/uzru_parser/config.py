@@ -96,6 +96,9 @@ MAX_HEADING_LINES = 3
 LARGER_FONT_RATIO = 1.15
 #: Share of bold characters for a block to count as bold.
 BOLD_SHARE = 0.6
+#: A first line this bold or more is bold throughout; below it, a bold run-in term can open
+#: a plain paragraph.
+RUN_IN_BOLD_SHARE = 0.95
 #: Uppercase signal: at least this many letters, nearly all capitals.
 MIN_UPPERCASE_LETTERS = 4
 UPPERCASE_SHARE = 0.9
@@ -109,6 +112,43 @@ MAX_LEVEL = 6
 #: Wrapped heading continuation: longest second part and largest gap (in line heights).
 MAX_CONTINUATION_CHARS = 100
 CONTINUATION_GAP = 1.5
+#: Words that cannot end a title, so a heading ending with one goes on in the next line
+#: (Uzbek Latin and Cyrillic, Russian, English). Optional: style and spacing work without it.
+JOINING_WORDS: tuple[str, ...] = (
+    "va",
+    "hamda",
+    "yoki",
+    "bilan",
+    "uchun",
+    "ва",
+    "ҳамда",
+    "ёки",
+    "билан",
+    "учун",
+    "и",
+    "или",
+    "в",
+    "во",
+    "на",
+    "по",
+    "для",
+    "с",
+    "со",
+    "о",
+    "об",
+    "к",
+    "от",
+    "из",
+    "and",
+    "or",
+    "of",
+    "the",
+    "for",
+    "in",
+    "on",
+    "to",
+    "with",
+)
 #: Short-title detection inside a block: last title line versus the longest line.
 TITLE_LINE_RATIO = 0.75
 MAX_TITLE_LINES = 3
@@ -118,6 +158,17 @@ TITLE_MATCH_SHARE = 0.6
 #: split off when it ends like a clause (":" or ";") or with a full stop after more words
 #: than a title has. Long titles without a full stop stay titles.
 MAX_TITLE_WORDS = 8
+#: Leading characters of two numbered titles compared to tell an outline entry from the
+#: heading it announces.
+OUTLINE_TITLE_CHARS = 40
+#: A line with a math operator and fewer real words (4+ letters) than this is a formula.
+FORMULA_MAX_WORDS = 2
+#: Largest gap, in font sizes, between a caption and the table or figure below it.
+CAPTION_GAP = 3.0
+#: A fragment this short without a 3-letter word is formula or chart debris ("=", "p&").
+DEBRIS_CHARS = 5
+#: Largest gap, in font sizes, between a sentence and an inline formula on its row.
+INLINE_FORMULA_GAP = 3.0
 MAX_KEYWORD_MARKER_WORDS = 3
 #: A short line in capitals ending with ".", ":" or ";" right after a paragraph that stops
 #: mid-sentence is that sentence's end, not a heading.

@@ -23,10 +23,14 @@ _ENDS_SENTENCE = re.compile(r"[.!?:…][\"'»”’)\]]*\s*$")
 _NUMBER_TOKEN = re.compile(
     r"^\s*(?:\d{1,3}(?:\.\d{1,3})*\.?|[IVXLC]{1,6}\.?|(?:\d{1,3}|[IVXLC]{1,6})\s*-\s*[^\W\d_]+[.:]?)\s*$"
 )
+#: A list marker standing alone: "1)", "a)", "•", "✓", "-".
+_MARKER_TOKEN = re.compile(r"^\s*(?:\d{1,3}[.)]|[^\W\d_]\)|[•·▪●○■◦–—\-*✓✔➢➤►▶◆❖□])\s*$")
 _LEADER_END = re.compile(r"(?:\.{3,}|…)\s*$")
+_MATH_OPERATOR = re.compile(r"[=<>±×÷∑∏√∫≈≠≤≥]")
 _PAGE_NUMBER = re.compile(r"^\s*\d{1,4}\s*$")
 FIGURE_SEPARATOR = " | "
 RIGHT_EDGE_PERCENTILE = 0.9
+LEFT_EDGE_PERCENTILE = 0.1
 
 
 @dataclass
@@ -145,35 +149,43 @@ def _join_row(a: Line, b: Line) -> Line:
 
 
 def merge_row_fragments(lines: list[Line]) -> list[Line]:
-    """Put a lone section number ("1.1.", "II-BOB") and its title back on one line, and a
-    contents page number back after its leader ("Title …" + "7")."""
+    """Put a lone section number ("1.1.", "II-BOB") or list marker ("1)", "•", "✓") and its
+    text back on one line, a contents page number back after its leader ("Title …" +
+    "7"), and an inline formula fragment back into the sentence on its row."""
     merged: list[Line] = []
+    formula_end = False  # the last merged line ends with a formula fragment
     for line in lines:
         previous = merged[-1] if merged else None
         if previous is not None and _same_row(previous, line):
-            number_then_title = _NUMBER_TOKEN.match(previous.text) is not None
+            number_then_title = (
+                _NUMBER_TOKEN.match(previous.text) is not None
+                or _MARKER_TOKEN.match(previous.text) is not None
+            )
+            size = previous.size or line.size or 10.0
+            near = line.bbox[0] - previous.bbox[2] <= config.INLINE_FORMULA_GAP * size
+            debris = is_debris(line.text)
+            inline_formula = near and (formula_end or is_debris(previous.text) or debris)
             leader_then_page = _LEADER_END.search(previous.text) and _PAGE_NUMBER.match(line.text)
-            if number_then_title or leader_then_page:
+            if number_then_title or leader_then_page or inline_formula:
                 merged[-1] = _join_row(previous, line)
+                formula_end = debris
                 continue
         merged.append(line)
+        formula_end = is_debris(line.text)
     return merged
 
 
 def join_spread_lines(lines: list[Line], right_edge: float) -> list[Line]:
     """Put a justified line back together when the PDF stores its widely spaced words as
-    separate lines: pieces of one size on one row that together run from the text's left
-    edge to ``right_edge``, next to a full line of running text."""
+    separate lines: words of one size on one row that together run from the text's
+    left edge to ``right_edge``, with running text (or another such row) right above or
+    below. Diagram boxes hold several words each and stay apart."""
     if len(lines) < 2:
         return lines
     left_edge = min(line.bbox[0] for line in lines)
 
-    def full(line: Line) -> bool:
-        size = line.size or 10.0
-        return (
-            line.bbox[0] <= left_edge + config.PARAGRAPH_MAX_INDENT * size
-            and line.bbox[2] >= right_edge - config.PARAGRAPH_SHORT_LINE * size
-        )
+    def starts_at_edge(line: Line) -> bool:
+        return line.bbox[0] <= left_edge + config.PARAGRAPH_MAX_INDENT * (line.size or 10.0)
 
     rows: list[list[Line]] = []
     for line in lines:
@@ -182,29 +194,51 @@ def join_spread_lines(lines: list[Line], right_edge: float) -> list[Line]:
             row.append(line)
         else:
             rows.append([line])
+    ordered = [sorted(row, key=lambda line: line.bbox[0]) for row in rows]
+
+    def spread(row: list[Line]) -> bool:
+        size = row[0].size or 10.0
+        # The first piece may carry a list marker or normally spaced words, the last one the
+        # line's tail; the stretched middle holds one word per piece.
+        multi_word = sum(1 for piece in row[1:-1] if len(piece.text.split()) > 1)
+        return (
+            len(row) > 1
+            and len({_size_key(piece.size) for piece in row}) == 1
+            and multi_word == 0
+            and all(
+                b.bbox[0] - a.bbox[2] <= config.SPREAD_LINE_GAP * size
+                for a, b in zip(row, row[1:], strict=False)
+            )
+            and starts_at_edge(row[0])
+            and row[-1].bbox[2] >= right_edge - config.PARAGRAPH_SHORT_LINE * size
+        )
+
+    candidates = [spread(row) for row in ordered]
+
+    def running_text_beside(index: int) -> bool:
+        """A text line or another spread row of the same size directly above or below."""
+        row = ordered[index]
+        size = row[0].size or 10.0
+        for other in (index - 1, index + 1):
+            if not 0 <= other < len(rows):
+                continue
+            first = ordered[other][0]
+            gap = max(first.bbox[1] - row[0].bbox[3], row[0].bbox[1] - first.bbox[3])
+            text_line = len(rows[other]) == 1 and starts_at_edge(first)
+            if (
+                _size_key(first.size) == _size_key(size)
+                and gap <= size
+                and (text_line or candidates[other])
+            ):
+                return True
+        return False
 
     joined: list[Line] = []
     for index, row in enumerate(rows):
-        pieces = sorted(row, key=lambda line: line.bbox[0])
-        line = pieces[0]
-        for piece in pieces[1:]:
-            line = _join_row(line, piece)
-        neighbours = [
-            rows[i][0] for i in (index - 1, index + 1) if 0 <= i < len(rows) and len(rows[i]) == 1
-        ]
-        size = pieces[0].size or 10.0
-        if (
-            len(pieces) > 1
-            and len({_size_key(piece.size) for piece in pieces}) == 1
-            and all(
-                b.bbox[0] - a.bbox[2] <= config.SPREAD_LINE_GAP * size
-                for a, b in zip(pieces, pieces[1:], strict=False)
-            )
-            and full(line)
-            and any(
-                _size_key(other.size) == _size_key(size) and full(other) for other in neighbours
-            )
-        ):
+        if candidates[index] and running_text_beside(index):
+            line = ordered[index][0]
+            for piece in ordered[index][1:]:
+                line = _join_row(line, piece)
             joined.append(line)
         else:
             joined.extend(row)
@@ -287,13 +321,20 @@ def figure_labels(
 def _continues(paragraph: list[Line], line: Line, stats: LayoutStats, page_right: float) -> bool:
     """Does ``line`` belong to the paragraph whose lines are ``paragraph``?"""
     last, first = paragraph[-1], paragraph[0]
-    if line.chars and last.chars and _style(line) != _style(last):
+    if (
+        line.chars
+        and last.chars
+        and _style(line) != _style(last)
+        and not _after_run_in_lead(paragraph, line)
+    ):
         return False
     size = last.size or line.size or stats.body_size
     gap = line.bbox[1] - last.bbox[3]
     if gap < -0.5 * size or gap > stats.line_gap + config.PARAGRAPH_GAP_SLACK * size:
         return False
-    if not _overlaps_horizontally(line.bbox, last.bbox) or numbering_info(line.text):
+    if not _overlaps_horizontally(line.bbox, last.bbox):
+        return False
+    if numbering_info(line.text) and not _dash_in_sentence(paragraph, line, page_right):
         return False
 
     tolerance = config.PARAGRAPH_ALIGN_TOLERANCE * size
@@ -316,6 +357,52 @@ def _continues(paragraph: list[Line], line: Line, stats: LayoutStats, page_right
     # Producers that write whole paragraphs as blocks: a new block is a new paragraph
     # unless the sentence visibly runs on.
     return stats.line_blocks or line.block == last.block or not sentence_break
+
+
+def _dash_in_sentence(paragraph: list[Line], line: Line, page_right: float) -> bool:
+    """A line opening with a dash continues the sentence ("... uchun 2" + "– semestrda") when
+    the line above runs to the right edge without ending a sentence or a lead-in, the dash sits
+    at the paragraph's left edge, and the paragraph is not a dash list itself."""
+    last, first = paragraph[-1], paragraph[0]
+    if line.text.lstrip()[:1] not in "–—-" or numbering_info(first.text):
+        return False
+    size = last.size or line.size or 10.0
+    full = last.bbox[2] >= page_right - config.PARAGRAPH_SHORT_LINE * size
+    left = min(other.bbox[0] for other in paragraph)
+    aligned = line.bbox[0] <= left + config.PARAGRAPH_ALIGN_TOLERANCE * size
+    return full and aligned and last.text.rstrip()[-1:] not in ".:;!?"
+
+
+def _after_run_in_lead(paragraph: list[Line], line: Line) -> bool:
+    """``line`` continues a first line that opens with a bold term ("**Term** – bu ..."):
+    same size, the bold stops before the first line ends, and the sentence runs on."""
+    first = paragraph[0]
+    return (
+        len(paragraph) == 1
+        and _size_key(first.size) == _size_key(line.size)
+        and config.BOLD_SHARE <= first.bold < config.RUN_IN_BOLD_SHARE
+        and line.bold < config.BOLD_SHARE
+        and (_starts_lowercase(line.text) or not _ends_sentence(first.text))
+    )
+
+
+def _starts_next_paragraph(
+    members: list[Line], line: Line, left_edge: float, stats: LayoutStats, page_right: float
+) -> bool:
+    """A finished one-line paragraph took the indented first line of the next paragraph as
+    its second line: ``line`` goes back to the left edge and continues that indented line."""
+    if len(members) != 2:
+        return False
+    first, second = members
+    size = second.size or stats.body_size
+    tolerance = config.PARAGRAPH_ALIGN_TOLERANCE * size
+    finished = _ends_sentence(first.text) or first.text.rstrip().endswith(";")
+    return (
+        finished
+        and second.bbox[0] > left_edge + tolerance
+        and abs(line.bbox[0] - left_edge) <= tolerance
+        and _continues([second], line, stats, page_right)
+    )
 
 
 def _block_from(lines: list[Line], page: int, spaced: bool, role: str | None = None) -> RawBlock:
@@ -357,6 +444,9 @@ def build_paragraphs(
     page_right = right_edge()
     labels = figure_labels(lines, regions or [], stats.body_size, page_right)
 
+    body_left = sorted(line.bbox[0] for line in lines if _is_body(line, stats.body_size))
+    left_edge = body_left[int(LEFT_EDGE_PERCENTILE * (len(body_left) - 1))] if body_left else 0.0
+
     groups: list[tuple[str, int, list[Line]]] = []  # (kind, index of first line, lines)
     for index, line in enumerate(lines):
         kind = "figure" if index in labels else "paragraph"
@@ -364,6 +454,11 @@ def build_paragraphs(
             members = groups[-1][2]
             if kind == "figure" or _continues(members, line, stats, page_right):
                 members.append(line)
+                continue
+            if kind == "paragraph" and _starts_next_paragraph(
+                members, line, left_edge, stats, page_right
+            ):
+                groups.append((kind, index - 1, [members.pop(), line]))
                 continue
         groups.append((kind, index, [line]))
 
@@ -376,7 +471,60 @@ def build_paragraphs(
         gap_above = members[0].bbox[1] - lines[first - 1].bbox[3] if first else 0.0
         spaced = gap_above > stats.line_gap + config.HEADING_SPACE_ABOVE * size
         blocks.append(_block_from(members, page, spaced))
+    _mark_figure_text(blocks, regions or [])
     return blocks
+
+
+def is_debris(text: str) -> bool:
+    """A formula or chart fragment: a few characters without a real word ("=", "p&", "G &",
+    "0"), or a math operator with hardly any real words."""
+    flat = " ".join(text.split())
+    if not flat:
+        return False
+    words = [w for w in re.findall(r"[^\W\d_]+", flat) if len(w) >= 4]
+    if len(flat) <= config.DEBRIS_CHARS and not re.search(r"[^\W\d_]{3,}", flat):
+        return True
+    code = flat.endswith(":") or any(c in flat for c in "[]{};")  # "def f(x=[]):"
+    return bool(_MATH_OPERATOR.search(flat)) and len(words) < config.FORMULA_MAX_WORDS and not code
+
+
+def group_formula_debris(blocks: list[RawBlock]) -> list[RawBlock]:
+    """Formula and chart fragments become ``role="formula"`` blocks; a run of them is one
+    block, so a math page does not fall apart into hundreds of one-symbol paragraphs. Runs
+    after page numbers are removed and contents pages marked."""
+    grouped: list[RawBlock] = []
+    for block in blocks:
+        plain = block.role is None and block.rows is None and not block.footnote
+        if not plain or not is_debris(block.text):
+            grouped.append(block)
+            continue
+        previous = grouped[-1] if grouped else None
+        if previous is not None and previous.role == "formula" and previous.page == block.page:
+            previous.text = f"{previous.text} {' '.join(block.text.split())}"
+            previous.original = f"{previous.original}\n{block.original}"
+            if previous.bbox and block.bbox:
+                previous.bbox = (
+                    min(previous.bbox[0], block.bbox[0]),
+                    min(previous.bbox[1], block.bbox[1]),
+                    max(previous.bbox[2], block.bbox[2]),
+                    max(previous.bbox[3], block.bbox[3]),
+                )
+            continue
+        block.text = " ".join(block.text.split())
+        block.role = "formula"
+        grouped.append(block)
+    return grouped
+
+
+def _mark_figure_text(blocks: list[RawBlock], regions: list[BBox]) -> None:
+    """Text inside a drawing that holds figure labels belongs to the figure (a chart's title or
+    axis name): it is never a heading."""
+    for region in regions:
+        inside = [b for b in blocks if b.bbox and _center_in(b.bbox, region)]
+        if any(b.role == "figure" for b in inside):
+            for block in inside:
+                if block.role != "figure":
+                    block.in_figure = True
 
 
 def figure_regions(rects: list[BBox], page_box: BBox, body_size: float) -> list[BBox]:
