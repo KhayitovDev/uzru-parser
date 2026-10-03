@@ -51,8 +51,10 @@ fn depth_of(word: &str) -> Option<usize> {
         .map(|&(_, depth)| depth)
 }
 
+/// Roman numeral letters, with the Cyrillic "І" (U+0406) and "Х" (U+0425) that OCR and
+/// Cyrillic keyboards put in place of "I" and "X".
 fn is_roman(c: char) -> bool {
-    matches!(c, 'I' | 'V' | 'X' | 'L' | 'C')
+    matches!(c, 'I' | 'V' | 'X' | 'L' | 'C' | '\u{0406}' | '\u{0425}')
 }
 
 /// Keyword followed by a number: "Статья 5", "Приложение № 1", "РАЗДЕЛ II".
@@ -91,7 +93,7 @@ fn number_first(text: &str) -> Option<usize> {
     } else {
         let numeral = text.find(|c: char| !is_roman(c)).unwrap_or(text.len());
         let after = &text[numeral..];
-        if digits != 0 || !(1..=6).contains(&numeral) {
+        if digits != 0 || !(1..=6).contains(&text[..numeral].chars().count()) {
             return None;
         }
         match after.trim_start().strip_prefix('-') {
@@ -143,14 +145,15 @@ fn decimal_depth(text: &str) -> Option<usize> {
     (has_title && (trailing_dot || groups > 1)).then_some(groups)
 }
 
-/// Latin roman numeral followed by a dot and a title: "I. Общие положения".
+/// Roman numeral followed by a dot and a title: "I. Общие положения". A lone Cyrillic "Х."
+/// is an initial ("Х. Хайдаров"), not ten.
 fn roman_depth(text: &str) -> Option<usize> {
-    let numeral: String = text
-        .chars()
-        .take_while(|c| matches!(c, 'I' | 'V' | 'X' | 'L' | 'C'))
-        .collect();
-    let rest = text[numeral.len()..].strip_prefix('.')?;
-    let valid = (1..=6).contains(&numeral.len())
+    let end = text.find(|c: char| !is_roman(c)).unwrap_or(text.len());
+    let numeral = &text[..end];
+    let rest = text[end..].strip_prefix('.')?;
+    let letters = numeral.chars().count();
+    let valid = (1..=6).contains(&letters)
+        && numeral != "\u{0425}"
         && rest.starts_with(char::is_whitespace)
         && !rest.trim().is_empty();
     valid.then_some(1)
@@ -266,6 +269,14 @@ mod tests {
         assert_eq!(info("I."), None);
         assert_eq!(info("Index. text"), None);
         assert_eq!(info("И. И. Иванов"), None);
+        assert_eq!(info("\u{0406}. Общие положения"), Some(("decimal", 1)));
+        assert_eq!(
+            info("\u{0406}\u{0406}\u{0406}. Состояние"),
+            Some(("decimal", 1))
+        );
+        assert_eq!(info("\u{0425}\u{0406}. Заключение"), Some(("decimal", 1)));
+        assert_eq!(info("Х. Хайдаров доктор наук"), None);
+        assert_eq!(info("С. Иванов"), None);
     }
 
     #[test]

@@ -113,3 +113,53 @@ def test_docx_mixed_alphabet_words_are_fixed(tmp_path: Path) -> None:
     result = parse(path)
     assert result.blocks[0].text == "Valyuta bozori va maʼlumot tizimi."
     assert result.metadata.extra["mixed_script_words_fixed"] == 2
+
+
+def bold_paragraph(document: docx.document.Document, text: str) -> None:
+    document.add_paragraph().add_run(text).bold = True
+
+
+def test_sentence_broken_over_paragraphs_by_ocr_is_joined(tmp_path: Path) -> None:
+    document = docx.Document()
+    bold_paragraph(document, "І. Общие положения")
+    document.add_paragraph("Участниками системы обеспечения информационной")
+    document.add_paragraph("безопасности являются: собственники объектов инфраструктуры.")
+    document.add_paragraph("В настоящей Доктрине используются следующие основные")
+    bold_paragraph(document, "ПОНЯТИЯ:")
+    document.add_paragraph("а) национальные интересы в информационной сфере;")
+    bold_paragraph(document, "ІІ. Национальные интересы")
+    document.add_paragraph("Национальными интересами являются права граждан.")
+    path = tmp_path / "ocr.docx"
+    document.save(path)
+
+    blocks = parse(path).blocks
+    assert [b.text for b in blocks if b.type is BlockType.HEADING] == [
+        "І. Общие положения",
+        "ІІ. Национальные интересы",
+    ]
+    assert [(b.type, b.text) for b in blocks[:3]] == [
+        (BlockType.HEADING, "І. Общие положения"),
+        (
+            BlockType.PARAGRAPH,
+            "Участниками системы обеспечения информационной безопасности являются: "
+            "собственники объектов инфраструктуры.",
+        ),
+        (BlockType.PARAGRAPH, "В настоящей Доктрине используются следующие основные ПОНЯТИЯ:"),
+    ]
+
+
+def test_finished_paragraphs_in_docx_are_not_joined(tmp_path: Path) -> None:
+    document = docx.Document()
+    document.add_paragraph("(107-modda Qonuniga asosan chiqarilgan — 14.02.2025-y., 0144-son)")
+    document.add_paragraph("shaxsiy jamgʻarib boriladigan pensiya hisobvaragʻi raqami.")
+    document.add_paragraph("Birinchi gap tugadi.")
+    document.add_paragraph("keyingi qator kichik harf bilan.")
+    document.add_paragraph("Matn shu yerda tugadi.")
+    bold_paragraph(document, "UMUMIY QOIDALAR")
+    document.add_paragraph("Ushbu qoidalar xizmat tartibini belgilaydi.")
+    path = tmp_path / "laws.docx"
+    document.save(path)
+
+    blocks = parse(path).blocks
+    assert len(blocks) == 7
+    assert blocks[5].type is BlockType.HEADING

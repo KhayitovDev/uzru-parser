@@ -615,3 +615,30 @@ def test_quotes_closed_in_the_same_block_or_never_closed_change_nothing() -> Non
     ]
     headings = [b.text for b in build_blocks(raw) if b.type is BlockType.HEADING]
     assert headings == ["1-bob. Umumiy qoidalar", "2-bob. Yakunlovchi qoidalar"]
+
+
+def test_capital_sentence_tail_after_an_open_page_break_is_joined() -> None:
+    raws = [
+        RawBlock(text="В настоящей Доктрине используются следующие основные", page=1),
+        RawBlock(text="ПОНЯТИЯ:", page=2, bold=1.0, font_size=11.0),
+    ]
+    blocks = build_blocks(raws)
+    assert [b.text for b in blocks] == [
+        "В настоящей Доктрине используются следующие основные ПОНЯТИЯ:"
+    ]
+
+
+def test_capital_heading_after_a_finished_sentence_stays_a_heading() -> None:
+    raws = [
+        RawBlock(text="Matn shu yerda tugadi.", page=1),
+        RawBlock(text="UMUMIY QOIDALAR:", page=2, bold=1.0, font_size=11.0),
+        RawBlock(text="Ushbu qoidalar xizmat tartibini belgilaydi.", page=2),
+    ]
+    assert build_blocks(raws)[1].type is BlockType.HEADING
+
+
+@pytest.mark.parametrize("text", ["І. Общие положения", "IV. UMUMIY QOIDALAR"])
+def test_roman_numbered_section_is_not_a_list_item(text: str) -> None:
+    blocks = build_blocks([plain(text), plain("Matn shu yerda davom etadi.")])
+    assert blocks[0].type is BlockType.PARAGRAPH
+    assert blocks[0].text == text
