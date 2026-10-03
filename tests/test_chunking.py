@@ -275,3 +275,33 @@ def test_chunks_do_not_split_inside_abbreviations_or_initials() -> None:
     assert len(chunks) > 1
     for piece in chunks:
         assert piece.text.startswith("Работы") and piece.text.endswith("Москве.")
+
+
+def items(n: int) -> Block:
+    text = "\n".join(f"• пункт номер {i} описывает условия договора;" for i in range(n))
+    return Block(type=BlockType.LIST, text=text, page=1)
+
+
+def test_lead_in_line_moves_with_the_list_it_introduces() -> None:
+    doc = make_doc(
+        head("1. ОБЩИЕ ПОЛОЖЕНИЯ", 1),
+        para(sentences(6)),
+        para("Ограничения предложений"),
+        para("Отображаемые в приложении предложения:"),
+        items(6),
+    )
+    chunks = Chunker(max_tokens=100, overlap=0).chunk(doc)
+    assert len(chunks) == 2
+    assert chunks[0].text.endswith("договора.")
+    assert chunks[1].text.startswith("Ограничения предложений\n\nОтображаемые в приложении")
+
+
+def test_lead_in_stays_when_the_list_fits() -> None:
+    doc = make_doc(head("1. ОБЩИЕ ПОЛОЖЕНИЯ", 1), para("Проверьте:"), items(2))
+    assert [c.text for c in chunk(doc)] == ["1. ОБЩИЕ ПОЛОЖЕНИЯ\n\nПроверьте:\n\n" + items(2).text]
+
+
+def test_lead_in_alone_after_a_heading_is_not_moved() -> None:
+    doc = make_doc(head("1. ОБЩИЕ ПОЛОЖЕНИЯ", 1), para("Проверьте:"), items(12))
+    chunks = Chunker(max_tokens=100, overlap=0).chunk(doc)
+    assert chunks[0].text.startswith("1. ОБЩИЕ ПОЛОЖЕНИЯ\n\nПроверьте:\n\n• пункт номер 0")

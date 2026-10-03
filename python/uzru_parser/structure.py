@@ -930,10 +930,16 @@ def _inherit_short_languages(blocks: list[Block]) -> None:
     without one ("Reja:", numbers), short blocks below ``SHORT_LANGUAGE_CONFIDENCE`` and any
     block below ``LOW_LANGUAGE_CONFIDENCE``. A block with a language only looks at neighbours
     in its own script; when the two neighbours disagree, the language the document mostly
-    uses in that script wins."""
+    uses in that script wins. A block of one or two words ("Эквайринг", a loanword both languages
+    share) also follows its neighbours below ``TINY_LANGUAGE_CONFIDENCE``, if they agree."""
+
+    def tiny(block: Block) -> bool:
+        return len(block.text.split()) <= config.TINY_BLOCK_WORDS
 
     def unsure(block: Block) -> bool:
         info = block.language
+        if info.language in ("uz", "ru") and tiny(block):
+            return info.confidence < config.TINY_LANGUAGE_CONFIDENCE
         short = len(block.text.split()) < config.SHORT_BLOCK_WORDS
         if info.language == "unknown":
             return short
@@ -963,10 +969,11 @@ def _inherit_short_languages(blocks: list[Block]) -> None:
         if not neighbours:
             continue
         source = neighbours[0]
-        if (
-            len(neighbours) == 2
-            and neighbours[0].language.language != neighbours[1].language.language
-        ):
+        agree = len({b.language.language for b in neighbours}) == 1
+        weak = block.language.confidence < config.SHORT_LANGUAGE_CONFIDENCE
+        if block.language.language != "unknown" and tiny(block) and not agree and not weak:
+            continue
+        if len(neighbours) == 2 and not agree:
             script = source.language.script
             preferred = dominant[script].most_common(1)[0][0]
             source = next((b for b in neighbours if b.language.language == preferred), source)

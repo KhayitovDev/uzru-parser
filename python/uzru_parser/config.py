@@ -67,6 +67,9 @@ PARAGRAPH_SHORT_LINE = 4.0
 FULL_LINE_SHARE = 0.5
 #: Share of one-line PyMuPDF blocks above which blocks are treated as lines, not paragraphs.
 LINE_LEVEL_BLOCKS = 0.7
+#: Widest gap, in font sizes, between the pieces of one justified line that the PDF stores as
+#: separate lines because of its wide word spacing.
+SPREAD_LINE_GAP = 8.0
 
 # --- Figures --------------------------------------------------------------------------------
 
@@ -196,5 +199,13 @@ MIN_RULING_PATHS = 4
 SHORT_BLOCK_WORDS = 5
 SHORT_LANGUAGE_CONFIDENCE = 0.9
 LOW_LANGUAGE_CONFIDENCE = 0.7
+#: Blocks of at most this many words below TINY_LANGUAGE_CONFIDENCE follow their neighbours'
+#: language when both neighbours agree: loanwords shared by Uzbek and Russian ("Лизинг",
+#: "Эквайринг") score up to about 0.97, words of one language alone higher.
+TINY_BLOCK_WORDS = 2
+TINY_LANGUAGE_CONFIDENCE = 0.98
 #: Chunks below this many tokens are merged into a neighbour under the same heading.
 MIN_CHUNK_TOKENS = 50
+#: A short paragraph ending with ":" (and a short title line before it) introduces what
+#: follows and moves with it to the next chunk.
+LEAD_IN_TOKENS = 60

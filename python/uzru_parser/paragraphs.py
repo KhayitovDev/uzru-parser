@@ -160,6 +160,65 @@ def merge_row_fragments(lines: list[Line]) -> list[Line]:
     return merged
 
 
+def join_spread_lines(lines: list[Line], right_edge: float) -> list[Line]:
+    """Put a justified line back together when the PDF stores its widely spaced words as
+    separate lines: pieces of one size on one row that together run from the text's left
+    edge to ``right_edge``, next to a full line of running text."""
+    if len(lines) < 2:
+        return lines
+    left_edge = min(line.bbox[0] for line in lines)
+
+    def full(line: Line) -> bool:
+        size = line.size or 10.0
+        return (
+            line.bbox[0] <= left_edge + config.PARAGRAPH_MAX_INDENT * size
+            and line.bbox[2] >= right_edge - config.PARAGRAPH_SHORT_LINE * size
+        )
+
+    rows: list[list[Line]] = []
+    for line in lines:
+        row = rows[-1] if rows else None
+        if row is not None and all(_on_row(other, line) for other in row):
+            row.append(line)
+        else:
+            rows.append([line])
+
+    joined: list[Line] = []
+    for index, row in enumerate(rows):
+        pieces = sorted(row, key=lambda line: line.bbox[0])
+        line = pieces[0]
+        for piece in pieces[1:]:
+            line = _join_row(line, piece)
+        neighbours = [
+            rows[i][0] for i in (index - 1, index + 1) if 0 <= i < len(rows) and len(rows[i]) == 1
+        ]
+        size = pieces[0].size or 10.0
+        if (
+            len(pieces) > 1
+            and len({_size_key(piece.size) for piece in pieces}) == 1
+            and all(
+                b.bbox[0] - a.bbox[2] <= config.SPREAD_LINE_GAP * size
+                for a, b in zip(pieces, pieces[1:], strict=False)
+            )
+            and full(line)
+            and any(
+                _size_key(other.size) == _size_key(size) and full(other) for other in neighbours
+            )
+        ):
+            joined.append(line)
+        else:
+            joined.extend(row)
+    return joined
+
+
+def _on_row(a: Line, b: Line) -> bool:
+    """``b`` sits on the same printed row as ``a``, beside it."""
+    top, bottom = max(a.bbox[1], b.bbox[1]), min(a.bbox[3], b.bbox[3])
+    smaller = min(a.bbox[3] - a.bbox[1], b.bbox[3] - b.bbox[1]) or 1.0
+    beside = b.bbox[0] >= a.bbox[2] - 1.0 or b.bbox[2] <= a.bbox[0] + 1.0
+    return bottom - top >= 0.5 * smaller and beside
+
+
 def _center_in(box: BBox, region: BBox) -> bool:
     cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
     return region[0] <= cx <= region[2] and region[1] <= cy <= region[3]
@@ -287,10 +346,15 @@ def build_paragraphs(
     lines = [line for line in merge_row_fragments(lines) if line.text.strip()]
     if not lines:
         return []
-    body_right = [line.bbox[2] for line in lines if _is_body(line, stats.body_size)]
-    page_right = (
-        _right_edge(body_right, stats.right_edge) if len(body_right) >= 3 else stats.right_edge
-    )
+
+    def right_edge() -> float:
+        body_right = [line.bbox[2] for line in lines if _is_body(line, stats.body_size)]
+        if len(body_right) < 3:
+            return stats.right_edge
+        return _right_edge(body_right, stats.right_edge)
+
+    lines = join_spread_lines(lines, right_edge())
+    page_right = right_edge()
     labels = figure_labels(lines, regions or [], stats.body_size, page_right)
 
     groups: list[tuple[str, int, list[Line]]] = []  # (kind, index of first line, lines)

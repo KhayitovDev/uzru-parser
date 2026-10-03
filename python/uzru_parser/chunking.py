@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from .config import MIN_CHUNK_TOKENS
+from .config import LEAD_IN_TOKENS, MIN_CHUNK_TOKENS
 from .models import Block, BlockType, Document
 from .text import detect_language, estimate_tokens, split_sentences
 
@@ -174,11 +174,36 @@ class _Run:
     def add_body(self, unit: _Unit) -> None:
         max_tokens = self.chunker.max_tokens
         if self._body_tokens() and self._tokens() + unit.tokens > max_tokens:
+            lead = self._lead_in()
+            self.units = self.units[: len(self.units) - len(lead)]
             self.flush(carry_overlap=True)
+            self.units = lead
         if self.carry and self._tokens() + unit.tokens > max_tokens:
             self.carry = []
         unit.path = self._path()
         self.units.append(unit)
+
+    def _lead_in(self) -> list[_Unit]:
+        """Trailing units that introduce what comes next (a short title line, "... the
+        following:", or both), when the rest of the chunk still has body text."""
+        units = self.units
+
+        def short(unit: _Unit) -> bool:
+            plain = unit.kind is BlockType.PARAGRAPH and not unit.figure
+            return plain and unit.joiner == PARAGRAPH_JOINER and unit.tokens <= LEAD_IN_TOKENS
+
+        def title(unit: _Unit) -> bool:
+            return short(unit) and unit.text.rstrip()[-1:] not in ".!?:;…"
+
+        start = len(units)
+        if start and short(units[-1]) and units[-1].text.rstrip().endswith(":"):
+            start -= 1
+        if start and title(units[start - 1]):
+            start -= 1
+        rest = units[:start]
+        if not any(u.kind is not BlockType.HEADING and not u.figure for u in rest):
+            return []
+        return units[start:]
 
     def flush(self, carry_overlap: bool = False) -> None:
         if not self.units:
