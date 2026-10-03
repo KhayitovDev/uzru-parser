@@ -31,6 +31,20 @@ const UZ_WORDS: &str = "ва учун билан бу ёки ҳамда бўйи
     va uchun bilan bu yoki hamda boyicha esa bolgan kerak mumkin lozim tartibi qoidalar ushbu \
     kabi haqida tomonidan umumiy xizmat respublikasi";
 
+/// Word endings that mark Uzbek Latin text (checked on words of at least `MIN_SUFFIX_WORD`).
+const UZ_SUFFIXES: &[&str] = &[
+    "lar", "ning", "dagi", "lik", "ishi", "ligi", "larni", "larga",
+];
+const MIN_SUFFIX_WORD: usize = 6;
+
+/// A Latin word that looks Uzbek: "q" not followed by "u" (qoida, huquq) or a typical ending.
+fn has_uzbek_shape(word: &str) -> bool {
+    let has_lone_q = word
+        .match_indices('q')
+        .any(|(i, _)| !word[i + 1..].starts_with('u'));
+    has_lone_q || (word.len() >= MIN_SUFFIX_WORD && UZ_SUFFIXES.iter().any(|s| word.ends_with(s)))
+}
+
 /// Longest stop word in bytes; longer words skip the lookup entirely.
 const MAX_STOP_WORD_BYTES: usize = 24;
 
@@ -136,7 +150,7 @@ fn classify(word: &str, bare: &mut String) -> Vote {
         if is_stop_word(uz_words(), bare) {
             return Vote::Uz;
         }
-    } else if latin && (uz_digraph || is_stop_word(uz_words(), bare)) {
+    } else if latin && (uz_digraph || is_stop_word(uz_words(), bare) || has_uzbek_shape(bare)) {
         return Vote::Uz;
     }
     Vote::Neutral
@@ -289,6 +303,18 @@ mod tests {
                 "lowercase U+{code:04X}"
             );
         }
+    }
+
+    #[test]
+    fn short_uzbek_latin_phrases_are_recognized() {
+        for text in [
+            "mehnat sohasidagi ijtimoiy sheriklik;",
+            "Oldingi tahrirga qarang.",
+            "huquqlar",
+        ] {
+            assert_eq!(labels(text), ("uz", "latin"), "{text}");
+        }
+        assert_eq!(labels("Quality quote request").0, "unknown");
     }
 
     #[test]

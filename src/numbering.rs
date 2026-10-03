@@ -12,34 +12,58 @@ const KEYWORDS: &[(&str, usize)] = &[
     ("приложение", 1),
     ("глава", 2),
     ("часть", 2),
-    ("статья", 3),
+    ("статья", 4),
     ("параграф", 3),
     ("bolim", 1),
     ("ilova", 1),
     ("bob", 2),
     ("qism", 2),
-    ("modda", 3),
+    ("modda", 4),
     ("бўлим", 1),
     ("илова", 1),
     ("боб", 2),
     ("қисм", 2),
-    ("модда", 3),
+    ("модда", 4),
 ];
 
 const BULLETS: &[char] = &['•', '·', '▪', '●', '○', '■', '◦', '–', '—', '-', '*'];
 
-fn keyword_depth(text: &str) -> Option<usize> {
+/// Leading alphabetic word, lowercased and without apostrophes, plus the text after it.
+fn leading_word(text: &str) -> (String, &str) {
     let end = text
         .find(|c: char| !(c.is_alphabetic() || is_apostrophe(c)))
         .unwrap_or(text.len());
-    let word: String = text[..end]
+    let word = text[..end]
         .chars()
         .filter(|&c| !is_apostrophe(c))
         .flat_map(char::to_lowercase)
         .collect();
-    let (_, depth) = KEYWORDS.iter().find(|(k, _)| *k == word)?;
+    (word, &text[end..])
+}
 
-    let rest = &text[end..];
+const PARAGRAPH_SIGN: char = '§';
+const PARAGRAPH_DEPTH: usize = 3;
+
+fn depth_of(word: &str) -> Option<usize> {
+    KEYWORDS
+        .iter()
+        .find(|(k, _)| *k == word)
+        .map(|&(_, depth)| depth)
+}
+
+fn is_roman(c: char) -> bool {
+    matches!(c, 'I' | 'V' | 'X' | 'L' | 'C')
+}
+
+/// Keyword followed by a number: "Статья 5", "Приложение № 1", "РАЗДЕЛ II".
+fn keyword_first(text: &str) -> Option<usize> {
+    if let Some(rest) = text.strip_prefix(PARAGRAPH_SIGN) {
+        let next = rest.trim_start().chars().next()?;
+        return (rest.starts_with(char::is_whitespace) && next.is_ascii_digit())
+            .then_some(PARAGRAPH_DEPTH);
+    }
+    let (word, rest) = leading_word(text);
+    let depth = depth_of(&word)?;
     if !rest.starts_with(char::is_whitespace) {
         return None;
     }
@@ -50,7 +74,33 @@ fn keyword_depth(text: &str) -> Option<usize> {
         .trim_start()
         .chars()
         .next()?;
-    (next.is_ascii_digit() || matches!(next, 'I' | 'V' | 'X' | 'L' | 'C')).then_some(*depth)
+    (next.is_ascii_digit() || is_roman(next)).then_some(depth)
+}
+
+/// Number followed by a keyword, the Uzbek order: "1-modda", "12-bob", "I BOʻLIM".
+fn number_first(text: &str) -> Option<usize> {
+    let digits = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let rest = if (1..=3).contains(&digits) {
+        let rest = text[digits..].strip_prefix('-')?;
+        if rest.starts_with(PARAGRAPH_SIGN) {
+            return Some(PARAGRAPH_DEPTH);
+        }
+        rest
+    } else {
+        let numeral = text.find(|c: char| !is_roman(c)).unwrap_or(text.len());
+        let rest = &text[numeral..];
+        if digits != 0 || !(1..=6).contains(&numeral) || !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        rest.trim_start()
+    };
+    depth_of(&leading_word(rest).0)
+}
+
+fn keyword_depth(text: &str) -> Option<usize> {
+    keyword_first(text).or_else(|| number_first(text))
 }
 
 fn decimal_depth(text: &str) -> Option<usize> {
@@ -175,13 +225,23 @@ mod tests {
 
     #[test]
     fn keywords() {
-        assert_eq!(info("Статья 5. Права сторон"), Some(("keyword", 3)));
+        assert_eq!(info("Статья 5. Права сторон"), Some(("keyword", 4)));
         assert_eq!(info("РАЗДЕЛ II"), Some(("keyword", 1)));
         assert_eq!(info("Bo‘lim 3. Umumiy"), Some(("keyword", 1)));
-        assert_eq!(info("Modda 12"), Some(("keyword", 3)));
-        assert_eq!(info("МОДДА 7. Тартиб"), Some(("keyword", 3)));
+        assert_eq!(info("Modda 12"), Some(("keyword", 4)));
+        assert_eq!(info("МОДДА 7. Тартиб"), Some(("keyword", 4)));
         assert_eq!(info("Статья без номера"), None);
         assert_eq!(info("ПРИЛОЖЕНИЕ № 1"), Some(("keyword", 1)));
+        assert_eq!(info("1-modda. Ushbu Kodeks"), Some(("keyword", 4)));
+        assert_eq!(info("1-§. Yakka tartib"), Some(("keyword", 3)));
+        assert_eq!(info("§ 2. Общие правила"), Some(("keyword", 3)));
+        assert_eq!(info("§ без номера"), None);
+        assert_eq!(info("12-bob. Asosiy qoidalar"), Some(("keyword", 2)));
+        assert_eq!(info("I BOʻLIM. UMUMIY QOIDALAR"), Some(("keyword", 1)));
+        assert_eq!(info("XIII BOB"), Some(("keyword", 2)));
+        assert_eq!(info("3-қисм. Умумий"), Some(("keyword", 2)));
+        assert_eq!(info("5-moddasi boʻyicha"), None);
+        assert_eq!(info("1-bandda koʻrsatilgan"), None);
         assert_eq!(info("Ilova №2"), Some(("keyword", 1)));
     }
 

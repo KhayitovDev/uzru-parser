@@ -9,6 +9,7 @@ from .models import Block, BlockType
 from .text import detect_language, normalize, numbering_info, repair_hyphenation
 
 MAX_HEADING_CHARS = 160
+MAX_KEYWORD_HEADING_CHARS = 300
 MAX_HEADING_LINES = 3
 SHORT_UPPERCASE_CHARS = 80
 LARGER_FONT_RATIO = 1.15
@@ -131,9 +132,12 @@ def _uppercase_ratio(text: str) -> float:
 
 def _is_heading(text: str, raw: RawBlock, body_size: float | None) -> bool:
     flat = _flatten(text)
-    if len(flat) > MAX_HEADING_CHARS or text.count("\n") + 1 > MAX_HEADING_LINES:
-        return False
     numbering = numbering_info(flat)
+    limit = (
+        MAX_KEYWORD_HEADING_CHARS if numbering and numbering[0] == "keyword" else MAX_HEADING_CHARS
+    )
+    if len(flat) > limit or text.count("\n") + 1 > MAX_HEADING_LINES:
+        return False
     if numbering and numbering[0] in ("bullet", "ordered"):
         return False
     uppercase = _uppercase_ratio(flat) >= 0.9

@@ -20,13 +20,17 @@ PARAGRAPH = "Настоящий договор является основани
     [
         ("1. ОБЩИЕ ПОЛОЖЕНИЯ", 1),
         ("1.1. Основные понятия", 2),
-        ("Статья 5. Права сторон", 3),
+        ("Статья 5. Права сторон", 4),
         ("1. UMUMIY QOIDALAR", 1),
         ("1.1. Asosiy tushunchalar", 2),
         ("2. XIZMAT KO‘RSATISH TARTIBI", 1),
         ("1. УМУМИЙ ҚОИДАЛАР", 1),
         ("1.2. Асосий тушунчалар", 2),
-        ("МОДДА 4. ҲУҚУҚЛАР ВА МАЖБУРИЯТЛАР", 3),
+        ("МОДДА 4. ҲУҚУҚЛАР ВА МАЖБУРИЯТЛАР", 4),
+        ("1-modda. Ushbu Kodeks bilan tartibga solinadigan munosabatlar", 4),
+        ("1-bob. Asosiy qoidalar", 2),
+        ("I BOʻLIM. UMUMIY QOIDALAR", 1),
+        ("1-§. Yakka tartibdagi munosabatlar", 3),
         ("ПРИЛОЖЕНИЕ № 1", 1),
         ("I. Общие положения", 1),
     ],
@@ -87,3 +91,11 @@ def test_numbering_info_wrapper() -> None:
 
 def test_split_sentences_wrapper() -> None:
     assert split_sentences("Первое. Второе.") == ["Первое.", "Второе."]
+
+
+def test_long_article_title_is_still_a_heading() -> None:
+    title = "12-modda. " + "Mehnat munosabatlarini tartibga solish va ularning asoslari " * 3
+    assert len(title) > 160
+    assert build_blocks([body(PARAGRAPH), heading(title.strip(), bold=0.0)])[1].type is (
+        BlockType.HEADING
+    )
