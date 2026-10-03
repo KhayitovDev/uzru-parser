@@ -135,3 +135,83 @@ def test_custom_token_counter() -> None:
 def test_invalid_configuration(max_tokens: int, overlap: int) -> None:
     with pytest.raises(ValueError):
         Chunker(max_tokens=max_tokens, overlap=overlap)
+
+
+def with_role(block: Block, role: str) -> Block:
+    block.extra["role"] = role
+    return block
+
+
+def test_contents_and_back_matter_stay_out_of_chunks() -> None:
+    doc = make_doc(
+        para("Asosiy matn."),
+        with_role(para("MUNDARIJA"), "toc"),
+        with_role(para("1-MAVZU ........ 3"), "toc"),
+        with_role(para("Nashriyot maʼlumotlari"), "back_matter"),
+    )
+    assert [c.text for c in chunk(doc)] == ["Asosiy matn."]
+    kept = Chunker(skip_roles=()).chunk(doc)
+    assert "MUNDARIJA" in kept[0].text
+
+
+def test_title_page_blocks_make_no_heading_path() -> None:
+    doc = make_doc(
+        with_role(para("TOSHKENT DAVLAT IQTISODIYOT UNIVERSITETI"), "title_page"),
+        head("1-MAVZU: KIRISH", 1),
+        para("Matn."),
+    )
+    first, second = chunk(doc)
+    assert first.heading_path == [] and second.heading_path == ["1-MAVZU: KIRISH"]
+
+
+def test_topic_heading_starts_a_new_chunk_even_after_a_small_chunk() -> None:
+    doc = make_doc(
+        head("1-MAVZU: KIRISH", 1),
+        para("Qisqa."),
+        head("2-MAVZU: PUL", 1),
+        head("2.1. Pul aylanmasi", 2),
+        para("Matn."),
+        head("3-MAVZU: BANK", 1),
+    )
+    chunks = chunk(doc)
+    assert [c.heading_path for c in chunks] == [
+        ["1-MAVZU: KIRISH"],
+        ["2-MAVZU: PUL", "2.1. Pul aylanmasi"],
+        ["3-MAVZU: BANK"],
+    ]
+
+
+def test_new_topic_drops_the_previous_topics_subheadings_from_the_path() -> None:
+    doc = make_doc(
+        head("2-MAVZU: PUL", 1),
+        head("2.1. Pul aylanmasi", 2),
+        para("Matn."),
+        head("4-MAVZU: RISKLAR", 1),
+        para("Boshqa matn."),
+    )
+    assert chunk(doc)[-1].heading_path == ["4-MAVZU: RISKLAR"]
+
+
+def test_consecutive_equal_level_headings_do_not_share_a_chunk() -> None:
+    chunks = chunk(make_doc(head("A bob", 2), head("B bob", 2), para("Matn.")))
+    assert [c.text for c in chunks] == ["A bob", "B bob\n\nMatn."]
+
+
+def test_footnotes_stay_out_of_the_text_and_go_to_metadata() -> None:
+    note = Block(type=BlockType.FOOTNOTE, text="2 Manba nomi, 1995", page=1)
+    doc = make_doc(para("Birinchi qism"), note, para("ikkinchi qism."))
+    result = chunk(doc)
+    assert "Manba" not in result[0].text
+    assert result[0].metadata == {"footnotes": ["2 Manba nomi, 1995"]}
+
+
+def test_joined_paragraph_reports_both_pages() -> None:
+    joined = para("Sahifalar oshib ketgan gap.", page=49)
+    joined.extra["page_end"] = 50
+    result = chunk(make_doc(joined))[0]
+    assert (result.page_start, result.page_end) == (49, 50)
+
+
+def test_table_chunks_have_no_double_spaces() -> None:
+    table = Block(type=BlockType.TABLE, text="a | b\nc | d", page=1)
+    assert "  " not in chunk(make_doc(table))[0].text

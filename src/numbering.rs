@@ -9,16 +9,19 @@ pub struct Numbering {
 
 const KEYWORDS: &[(&str, usize)] = &[
     ("раздел", 1),
+    ("тема", 1),
     ("приложение", 1),
     ("глава", 2),
     ("часть", 2),
     ("статья", 4),
     ("параграф", 3),
+    ("mavzu", 1),
     ("bolim", 1),
     ("ilova", 1),
     ("bob", 2),
     ("qism", 2),
     ("modda", 4),
+    ("мавзу", 1),
     ("бўлим", 1),
     ("илова", 1),
     ("боб", 2),
@@ -83,7 +86,7 @@ fn number_first(text: &str) -> Option<usize> {
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(text.len());
     let rest = if (1..=3).contains(&digits) {
-        let rest = text[digits..].strip_prefix('-')?;
+        let rest = text[digits..].trim_start().strip_prefix('-')?.trim_start();
         if rest.starts_with(PARAGRAPH_SIGN) {
             return Some(PARAGRAPH_DEPTH);
         }
@@ -237,6 +240,12 @@ mod tests {
         assert_eq!(info("§ 2. Общие правила"), Some(("keyword", 3)));
         assert_eq!(info("§ без номера"), None);
         assert_eq!(info("12-bob. Asosiy qoidalar"), Some(("keyword", 2)));
+        assert_eq!(info("3-MAVZU: BANK OPERATSIYALARI"), Some(("keyword", 1)));
+        assert_eq!(info("10 - mavzu: Guruhlarda ishlash"), Some(("keyword", 1)));
+        assert_eq!(info("4-МАВЗУ: Банк рисклари"), Some(("keyword", 1)));
+        assert_eq!(info("Тема 5. Валютные операции"), Some(("keyword", 1)));
+        assert_eq!(info("5 - modda. Erkinlik"), Some(("keyword", 4)));
+        assert_eq!(info("1-MAVZUGA oid"), None);
         assert_eq!(info("I BOʻLIM. UMUMIY QOIDALAR"), Some(("keyword", 1)));
         assert_eq!(info("XIII BOB"), Some(("keyword", 2)));
         assert_eq!(info("3-қисм. Умумий"), Some(("keyword", 2)));
