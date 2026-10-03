@@ -27,7 +27,6 @@ from .text import CleanStats, Hyphenator, clean, compound_pairs, map_symbol_font
 PYMUPDF_BOLD_FLAG = 16
 PYMUPDF_SUPERSCRIPT_FLAG = 1
 IMAGE_BLOCK = 1
-MIN_TEXT_CHARS = 25
 SYMBOL_FONTS = ("symbol", "wingding", "webding", "dingbats")
 MAX_MARK_CHARS = 3
 MARK_SIZE_RATIO = 0.8
@@ -131,8 +130,25 @@ def _read_page(
         tables=tables,
         drawings=[tuple(d["rect"]) for d in drawings] + images,
         page_box=tuple(page.rect),
-        needs_ocr=bool(images) and chars < MIN_TEXT_CHARS,
+        needs_ocr=_is_scanned(images, tuple(page.rect), chars),
     )
+
+
+def _is_scanned(images: list[BBox], page_box: BBox, chars: int) -> bool:
+    """A page whose text is in pictures: images and almost no text, or images covering most
+    of the page with only a stamp or a page number as text."""
+    if not images:
+        return False
+    if chars < config.MIN_TEXT_CHARS:
+        return True
+    x0, y0, x1, y1 = page_box
+    area = (x1 - x0) * (y1 - y0)
+    covered = sum(
+        max(0.0, min(b[2], x1) - max(b[0], x0)) * max(0.0, min(b[3], y1) - max(b[1], y0))
+        for b in images
+    )
+    mostly_images = area > 0 and covered >= config.SCAN_IMAGE_COVER * area
+    return mostly_images and chars < config.SCAN_MAX_TEXT_CHARS
 
 
 def _clean_lines(lines: list[Line], stats: CleanStats) -> None:

@@ -108,6 +108,22 @@ TITLE_LINE_RATIO = 0.75
 MAX_TITLE_LINES = 3
 #: A bookmark/contents title matches a block when the block holds this share of it.
 TITLE_MATCH_SHARE = 0.6
+#: "5-modda. Ushbu Qonun ... kuchga kiradi." is an untitled article and its text: the text is
+#: split off when it ends like a clause (":" or ";") or with a full stop after more words
+#: than a title has. Long titles without a full stop stay titles.
+MAX_TITLE_WORDS = 8
+MAX_KEYWORD_MARKER_WORDS = 3
+#: Text inside a quotation (an amended law quoting new articles) holds no headings of the
+#: document; a quotation still open after this many blocks is treated as a stray mark.
+MAX_QUOTED_BLOCKS = 300
+
+# --- Scanned pages ----------------------------------------------------------------------------
+
+#: A page needs OCR when it has images and less text than this...
+MIN_TEXT_CHARS = 25
+#: ...or when images cover this share of it and its text is a stamp or a page number.
+SCAN_IMAGE_COVER = 0.5
+SCAN_MAX_TEXT_CHARS = 200
 
 # --- Page furniture, footnotes, title page, contents ----------------------------------------
 
@@ -148,7 +164,9 @@ MIN_RULING_PATHS = 4
 
 # --- Language and chunks --------------------------------------------------------------------
 
-#: Blocks with fewer words take the language of their neighbours when their own is unknown.
+#: Blocks with fewer words take the language of their neighbours when their own is unknown,
+#: or only a guess (plain Cyrillic without markers) at most this confident.
 SHORT_BLOCK_WORDS = 5
+WEAK_LANGUAGE_CONFIDENCE = 0.3
 #: Chunks below this many tokens are merged into a neighbour under the same heading.
 MIN_CHUNK_TOKENS = 50

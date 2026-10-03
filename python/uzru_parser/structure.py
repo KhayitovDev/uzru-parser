@@ -25,6 +25,9 @@ SECTION_KINDS = ("decimal", "keyword")
 
 PLAN_LINE = re.compile(rf"^\s*(?:{'|'.join(config.PLAN_WORDS)})\s*:", re.IGNORECASE)
 FOOTNOTE_NUMBER = re.compile(r"^\s*(\d{1,3})(?:\s+|(?=[^\W\d_]))")
+QUOTE_MARK = re.compile("[“”„«»]")
+#: End of a possible "5-modda." / "Статья 5." marker: a full stop followed by text.
+MARKER_END = re.compile(r"\.\s+(?=\S)")
 LEADING_NUMBER = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,3})*)")
 LEADING_ROMAN = re.compile(r"^\s*([IVXLC]{1,6})\b")
 TOC_ENTRY = re.compile(r"^(?P<title>.*?)(?:\s*(?:…|\.{3,}))?\s*(?P<page>\d{1,4})?\s*$")
@@ -104,10 +107,11 @@ def build_blocks(
     raws = [part for raw in raw_blocks for part in _split_raw(raw, titles)]
     body_size = body_font_size(raws) or 0.0
     prepared = [(raw, _clean(raw, repair, stats, text_is_clean)) for raw in raws]
-    headings = _decide_headings(prepared, body_size, titles)
+    headings = _decide_headings(prepared, body_size, titles, _quoted(prepared))
     _assign_levels(headings, prepared)
 
     blocks: list[Block] = []
+    extended: list[Block] = []
     previous: RawBlock | None = None
     for (raw, text), heading in zip(prepared, headings, strict=True):
         if not text:
@@ -126,10 +130,13 @@ def build_blocks(
                 block.extra["heading_source"] = heading.source
                 blocks.append(block)
         elif items := _list_items(text, raw.list_item):
-            _append_list(blocks, items, raw)
+            if _append_list(blocks, items, raw):
+                extended.append(blocks[-1])
         else:
             blocks.append(_block(BlockType.PARAGRAPH, _flatten(text), raw))
         previous = raw
+    for block in {id(b): b for b in extended}.values():  # first item alone decided it
+        block.language = detect_language(block.text)
     blocks = _join_split_paragraphs(blocks, repair)
     _inherit_short_languages(blocks)
     return blocks
@@ -286,17 +293,19 @@ def _is_item_marker(marker: tuple[str, int] | None) -> bool:
     )
 
 
-def _append_list(blocks: list[Block], items: list[str], raw: RawBlock) -> None:
+def _append_list(blocks: list[Block], items: list[str], raw: RawBlock) -> bool:
+    """Add list items, to the list just before when there is one; ``True`` if extended."""
     previous = blocks[-1] if blocks else None
     same_role = previous is not None and previous.extra.get("role") == raw.role
     if previous is not None and previous.type is BlockType.LIST and same_role:
         previous.extra["items"].extend(items)
         previous.text = "\n".join(previous.extra["items"])
         previous.raw_text = f"{previous.raw_text}\n{raw.original or raw.text}"
-        return
+        return True
     block = _block(BlockType.LIST, "\n".join(items), raw)
     block.extra["items"] = list(items)
     blocks.append(block)
+    return False
 
 
 # --- Known titles (bookmarks, contents page) ----------------------------------------------
@@ -402,7 +411,7 @@ def _split_raw(raw: RawBlock, titles: _TitleIndex) -> list[RawBlock]:
     if lines and PLAN_LINE.match(lines[0]):
         return _plan_blocks(raw, lines)
     if len(lines) < 2:
-        return [raw]
+        return _split_untitled_article(raw, lines) or [raw]
     if titles and (end := titles.title_end(lines, raw.page)):
         return [_piece(raw, lines[:end]), *_split_raw(_piece(raw, lines[end:]), titles)]
     if cut := _list_end(lines):
@@ -422,7 +431,35 @@ def _split_raw(raw: RawBlock, titles: _TitleIndex) -> list[RawBlock]:
     if split_at:
         title = _piece(raw, lines[:split_at], heading_level=first[1], heading_source="numbering")
         return [title, _piece(raw, lines[split_at:])]
-    return [raw]
+    return _split_untitled_article(raw, lines) or [raw]
+
+
+def _split_untitled_article(raw: RawBlock, lines: list[str]) -> list[RawBlock] | None:
+    """ "5-modda. Ushbu Qonun ... kuchga kiradi." as the heading "5-modda." and its text."""
+    if not lines:
+        return None
+    first = lines[0]
+    for match in MARKER_END.finditer(first):
+        marker = first[: match.start() + 1].strip()
+        if len(marker.split()) > config.MAX_KEYWORD_MARKER_WORDS:
+            return None
+        numbering = numbering_info(marker)
+        if numbering is None or numbering[0] != "keyword":
+            continue
+        body = [first[match.end() :], *lines[1:]]
+        if not _is_article_text(_flatten(" ".join(body))):
+            return None
+        heading = _piece(raw, [marker], heading_level=numbering[1], heading_source="numbering")
+        return [heading, _piece(raw, body)]
+    return None
+
+
+def _is_article_text(text: str) -> bool:
+    """Text after an article number that is the article itself, not its title."""
+    if not text or _uppercase(text):
+        return False
+    long_sentence = text[-1] == "." and len(text.split()) > config.MAX_TITLE_WORDS
+    return text[-1] in ":;" or long_sentence
 
 
 def _line_groups(text: str) -> list[list[str]]:
@@ -589,13 +626,17 @@ def _item_number(text: str) -> int | None:
 
 
 def _decide_headings(
-    prepared: list[tuple[RawBlock, str]], body_size: float, titles: _TitleIndex
+    prepared: list[tuple[RawBlock, str]],
+    body_size: float,
+    titles: _TitleIndex,
+    quoted: set[int],
 ) -> list[_Heading | None]:
     headings: list[_Heading | None] = []
     plain_items: list[int] = []
     for index, (raw, text) in enumerate(prepared):
         size = raw.font_size or 0.0
-        if not text or not _is_candidate(raw):
+        styled = raw.heading_level is not None and raw.heading_source != "numbering"
+        if not text or not _is_candidate(raw) or (index in quoted and not styled):
             headings.append(None)
             continue
         if raw.heading_level is not None and raw.heading_source == "numbering":
@@ -619,6 +660,27 @@ def _decide_headings(
             plain_items.append(index)
     _keep_heading_sequences(headings, prepared, plain_items, body_size)
     return headings
+
+
+def _quoted(prepared: list[tuple[RawBlock, str]]) -> set[int]:
+    """Indexes of blocks that start inside a quotation opened in an earlier block, such as
+    new articles quoted by an amending law ("“131-modda. ..." up to the closing "”")."""
+    quoted: set[int] = set()
+    stack: list[tuple[str, int]] = []
+    for index, (raw, text) in enumerate(prepared):
+        if raw.rows is not None or raw.footnote:
+            continue
+        for match in QUOTE_MARK.finditer(text):
+            mark = match.group()
+            if mark in "«„" or (mark == "“" and not (stack and stack[-1][0] == "„")):
+                stack.append((mark, index))
+                continue
+            if not stack or (mark == "»") != (stack[-1][0] == "«"):
+                continue  # a stray closing mark
+            start = stack.pop()[1]
+            if 0 < index - start <= config.MAX_QUOTED_BLOCKS:
+                quoted.update(range(start + 1, index + 1))
+    return quoted
 
 
 def _keep_heading_sequences(
@@ -790,20 +852,36 @@ def _is_continuation(previous: Block, block: Block) -> bool:
 
 
 def _inherit_short_languages(blocks: list[Block]) -> None:
-    """Very short blocks ("Reja:", numbers, formulas) take a neighbour's language."""
-    known = [
-        i
-        for i, block in enumerate(blocks)
-        if block.language.language != "unknown" and block.type is not BlockType.FOOTNOTE
+    """Very short blocks ("Reja:", numbers, formulas) take a neighbour's language, and so do
+    short blocks whose language is only a guess ("Пул таклифи:" read as Russian for want of
+    markers), from a neighbour in the same script."""
+
+    def weak(block: Block) -> bool:
+        info = block.language
+        return info.language == "unknown" or info.confidence <= config.WEAK_LANGUAGE_CONFIDENCE
+
+    flow = [i for i, block in enumerate(blocks) if block.type is not BlockType.FOOTNOTE]
+    known = [i for i in flow if not weak(blocks[i])] or [
+        i for i in flow if blocks[i].language.language != "unknown"
     ]
     if not known:
         return
     for index, block in enumerate(blocks):
-        short = len(block.text.split()) < config.SHORT_BLOCK_WORDS
-        if block.language.language != "unknown" or not short:
+        if not weak(block) or len(block.text.split()) >= config.SHORT_BLOCK_WORDS:
             continue
         position = bisect.bisect_left(known, index)
-        source = blocks[known[position - 1] if position else known[0]]
+        before = blocks[known[position - 1]] if position else None
+        after = blocks[known[position]] if position < len(known) else None
+        if block.language.language == "unknown":
+            source = before or after
+        else:
+            script = block.language.script
+            source = next(
+                (b for b in (before, after) if b is not None and b.language.script == script),
+                None,
+            )
+        if source is None or source is block:
+            continue
         block.language = LanguageInfo(
             source.language.language, source.language.script, source.language.confidence
         )

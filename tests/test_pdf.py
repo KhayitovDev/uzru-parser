@@ -360,3 +360,34 @@ def test_mixed_alphabet_words_are_fixed_and_counted(tmp_path: Path) -> None:
     assert document.blocks[0].text == "Valyuta bozori va TAʼLIM tizimi haqida."
     assert document.metadata.extra["mixed_script_words_fixed"] == 3
     assert document.blocks[0].raw_text.startswith("Vаlyutа")  # the original stays recoverable
+
+
+def test_scan_with_a_text_stamp_is_flagged_for_ocr(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "stamped_scan.pdf"
+    doc = pymupdf.open()
+    for _ in range(3):
+        page = doc.new_page()
+        pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 60), False)
+        pixmap.clear_with(200)
+        page.insert_image(page.rect, pixmap=pixmap)
+        page.insert_text((40, 30), "QMMB: 09/26/518/0986-son 30.09.2026-y.", fontsize=10)
+    doc.save(pdf_path)
+    doc.close()
+
+    assert all(page.needs_ocr for page in parse(pdf_path).pages)
+
+
+def test_text_page_with_a_large_picture_is_not_flagged_for_ocr(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "picture.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 60), False)
+    pixmap.clear_with(200)
+    page.insert_image(pymupdf.Rect(0, 0, page.rect.width, page.rect.height * 0.6), pixmap=pixmap)
+    text = "Pul aylanmasi iqtisodiyotda muhim oʻrin tutadi va markaziy bank uni boshqaradi."
+    for i in range(6):
+        page.insert_text((72, 540 + i * 16), text, fontsize=10)
+    doc.save(pdf_path)
+    doc.close()
+
+    assert not parse(pdf_path).needs_ocr

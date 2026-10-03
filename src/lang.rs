@@ -23,16 +23,39 @@ enum Vote {
 }
 
 const RU_WORDS: &str = "и в не на что это как по для от из или при если который также может быть \
-    настоящий договор стороны статья после все его они без под над между является должен должны";
+    настоящий договор стороны статья после все его они без под над между является должен должны \
+    которые которых которая только уже так где когда чем был была были этот эти этого";
 
 /// Uzbek stop words, Cyrillic and Latin (Latin forms are stored without apostrophes).
 const UZ_WORDS: &str = "ва учун билан бу ёки ҳамда бўйича эса бўлган керак мумкин лозим тартиби \
-    қоидалар ушбу каби ҳақида томонидан \
+    қоидалар ушбу каби ҳақида томонидан мазкур агар кейин шунингдек янги шу бир энг \
     va uchun bilan bu yoki hamda boyicha esa bolgan kerak mumkin lozim tartibi qoidalar ushbu \
     kabi haqida tomonidan umumiy xizmat respublikasi";
 
 /// Word endings that mark Uzbek Latin text (checked on words of at least `MIN_SUFFIX_WORD`).
-const UZ_SUFFIXES: &[&str] = &["dagi", "ligi", "lik", "larni", "larga", "lardan", "larning"];
+const UZ_SUFFIXES: &[&str] = &[
+    "dagi", "ligi", "lik", "lari", "larni", "larga", "lardan", "larning",
+];
+/// The same for Uzbek Cyrillic.
+const UZ_CYRILLIC_SUFFIXES: &[&str] = &[
+    "даги",
+    "лиги",
+    "лари",
+    "ларни",
+    "ларга",
+    "лардан",
+    "ларда",
+    "сида",
+    "ланган",
+    "лган",
+    "нган",
+];
+/// Uzbek genitive, counted after a stem of `MIN_GENITIVE_STEM` letters: Russian words with
+/// this ending have short stems (тренинг, скрининг, клининг).
+const UZ_GENITIVE: &str = "нинг";
+const MIN_GENITIVE_STEM: usize = 5;
+/// Russian grammatical endings that Uzbek words, loanwords included, do not take.
+const RU_SUFFIXES: &[&str] = &["ться", "тся", "ого", "ому", "ость", "ости", "ению", "ением"];
 const MIN_SUFFIX_WORD: usize = 6;
 
 /// Below this share of marker words (in texts of at least `MIN_WORDS_FOR_COVERAGE` words)
@@ -46,6 +69,23 @@ fn has_uzbek_shape(word: &str) -> bool {
         .match_indices('q')
         .any(|(i, _)| !word[i + 1..].starts_with('u'));
     has_lone_q || (word.len() >= MIN_SUFFIX_WORD && UZ_SUFFIXES.iter().any(|s| word.ends_with(s)))
+}
+
+/// Vote of a Cyrillic word without script-specific letters, from its ending.
+fn cyrillic_ending_vote(word: &str) -> Vote {
+    if word.chars().count() < MIN_SUFFIX_WORD {
+        return Vote::Neutral;
+    }
+    let genitive = word
+        .strip_suffix(UZ_GENITIVE)
+        .is_some_and(|stem| stem.chars().count() >= MIN_GENITIVE_STEM);
+    if genitive || UZ_CYRILLIC_SUFFIXES.iter().any(|s| word.ends_with(s)) {
+        Vote::Uz
+    } else if RU_SUFFIXES.iter().any(|s| word.ends_with(s)) {
+        Vote::Ru
+    } else {
+        Vote::Neutral
+    }
 }
 
 /// Longest stop word in bytes; longer words skip the lookup entirely.
@@ -139,7 +179,8 @@ fn classify(word: &str, bare: &mut String) -> Vote {
         bare.push(lower);
         match lower {
             'ў' | 'қ' | 'ғ' | 'ҳ' => return Vote::Uz,
-            'ы' | 'э' | 'щ' | 'ё' => return Vote::Ru,
+            // "ё" and "э" are common in Uzbek Cyrillic too (сиёсат, экзоген).
+            'ы' | 'щ' => return Vote::Ru,
             _ => {}
         }
         cyrillic |= is_cyrillic(lower);
@@ -152,6 +193,9 @@ fn classify(word: &str, bare: &mut String) -> Vote {
         }
         if is_stop_word(uz_words(), bare) {
             return Vote::Uz;
+        }
+        if !latin {
+            return cyrillic_ending_vote(bare);
         }
     } else if latin && (uz_digraph || is_stop_word(uz_words(), bare) || has_uzbek_shape(bare)) {
         return Vote::Uz;
@@ -315,6 +359,7 @@ mod tests {
             "mehnat sohasidagi ijtimoiy sheriklik;",
             "Oldingi tahrirga qarang.",
             "huquqlar",
+            "Elektron tijorat operatorlari jumlasiga quyidagilar kiradi:",
         ] {
             assert_eq!(labels(text), ("uz", "latin"), "{text}");
         }
@@ -327,6 +372,33 @@ mod tests {
             Python uses reference counting for memory management, which is not thread-safe. \
             Threads share memory and are lightweight, but are limited by the interpreter lock.";
         assert_eq!(labels(english), ("unknown", "latin"));
+    }
+
+    #[test]
+    fn uzbek_cyrillic_with_yo_and_e_is_not_mixed() {
+        for text in [
+            "Энди, чайқовчилик хужуми фақат натижасида олтин валюта резервлари экзоген шоклардагина содир бўлади.",
+            "8-мавзу. Монетар сиёсатда қўлланиладиган математик моделлар",
+            "Иқтисодиётнинг бошланғич мувозанат ҳолати",
+            "Моделнинг назарий асослари:",
+            "Олтин валюта резервлари динамикаси.",
+            "Марказий банк олтин валюта резервларининг камайиш сабабларининг",
+        ] {
+            assert_eq!(labels(text), ("uz", "cyrillic"), "{text}");
+        }
+    }
+
+    #[test]
+    fn russian_with_yo_and_e_stays_russian() {
+        for text in [
+            "Это решение утверждено советом, и оно вступает в силу после опубликования.",
+            "Ещё одна проверка: ученики пишут объяснения к этой задаче.",
+            "Доктрина информационной безопасности Российской Федерации",
+            "Проведение тренинга и скрининга для сотрудников компании",
+            "Тренинг и скрининг для сотрудников",
+        ] {
+            assert_eq!(labels(text), ("ru", "cyrillic"), "{text}");
+        }
     }
 
     #[test]
