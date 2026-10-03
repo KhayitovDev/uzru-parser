@@ -13,3 +13,4 @@
 - Faster language detection (about 2.5x) and a single-pass normalizer; shared character helpers.
 - Hyphenation keeps "по-русски" style adverbs and acronym suffixes ("BMT-ning").
 - Numbering recognizes "ПРИЛОЖЕНИЕ № 1" and roman sections ("I. Общие положения").
+- DOCX: paragraph styles are resolved once per style (about 4x faster on a 6-page FAQ).
