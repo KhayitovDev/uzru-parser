@@ -42,7 +42,7 @@ class _Unit:
     joiner: str = PARAGRAPH_JOINER
     page_end: int = 0
     path: tuple[str, ...] = ()
-    figure: bool = False  # figure label text: never a chunk of its own
+    figure: bool = False  # figure label or formula text: never a chunk of its own
 
 
 class Chunker:
@@ -92,7 +92,7 @@ class Chunker:
     def _units(self, block: Block) -> list[_Unit]:
         tokens = self._count(block.text)
         page_end = block.extra.get("page_end", block.page)
-        figure = block.extra.get("role") == "figure"
+        figure = block.extra.get("role") in ("figure", "formula")
         unit = _Unit(block.text, tokens, block.page, block.type, page_end=page_end, figure=figure)
         return [unit] if tokens <= self.max_tokens else self.split_unit(unit)
 

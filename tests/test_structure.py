@@ -721,3 +721,313 @@ def test_one_word_loanword_follows_agreeing_neighbours() -> None:
 def test_one_word_loanword_between_disagreeing_neighbours_keeps_its_language() -> None:
     raw = [plain(UZ_CYRILLIC), plain("Лизинг"), plain(RUSSIAN)]
     assert build_blocks(raw)[1].language.language == "uz"
+
+
+UZ_BODY = "Bu boʻlimda bank tizimining asosiy tushunchalari batafsil koʻrib chiqiladi."
+SECTIONS = ["3.1. Banklarning turlari", "3.2. Markaziy bank vazifalari", "3.3. Bank operatsiyalari"]
+
+
+def chapter_with_outline() -> list[RawBlock]:
+    return [
+        heading("3-MAVZU: BANK OPERATSIYALARI"),
+        heading("Mavzu tuzilishi:", size=11.0),
+        *[heading(title, size=11.0) for title in SECTIONS],
+        body("Tayanch tushunchalar: bank, kredit, depozit."),
+        *[block for title in SECTIONS for block in (heading(title, size=11.0), body(UZ_BODY))],
+    ]
+
+
+def test_outline_entries_become_a_list_and_sections_stay_headings() -> None:
+    blocks = build_blocks(chapter_with_outline())
+    assert [b.text for b in blocks if b.type is BlockType.HEADING] == [
+        "3-MAVZU: BANK OPERATSIYALARI",
+        *SECTIONS,
+    ]
+    lists = [b for b in blocks if b.type is BlockType.LIST]
+    assert len(lists) == 1 and lists[0].extra["items"] == SECTIONS
+    assert blocks[1].type is BlockType.PARAGRAPH and blocks[1].text == "Mavzu tuzilishi:"
+
+
+def test_numbered_list_whose_items_never_return_stays_a_list() -> None:
+    raws = [
+        body("Bank quyidagi vazifalarni bajaradi:"),
+        body("1. Omonatlarni qabul qiladi."),
+        body("2. Kredit beradi."),
+        body(UZ_BODY),
+    ]
+    blocks = build_blocks(raws)
+    assert not [b for b in blocks if b.type is BlockType.HEADING]
+
+
+def test_same_number_and_title_in_body_text_stays_a_heading() -> None:
+    raws = [
+        heading("3.1. Banklarning turlari", size=11.0),
+        body(UZ_BODY),
+        heading("3.1. Banklarning turlari", size=11.0),
+        body(UZ_BODY),
+    ]
+    headings = [b for b in build_blocks(raws) if b.type is BlockType.HEADING]
+    assert len(headings) == 2
+
+
+def test_colon_label_is_not_glued_to_the_heading_before_it() -> None:
+    raws = [
+        heading("3-MAVZU: BANK OPERATSIYALARI"),
+        heading("Mavzu tuzilishi:"),
+        body("1. Banklarning turlari."),
+        body("2. Bank operatsiyalari."),
+    ]
+    blocks = build_blocks(raws)
+    assert blocks[0].text == "3-MAVZU: BANK OPERATSIYALARI"
+    assert blocks[1].text == "Mavzu tuzilishi:" and blocks[1].type is BlockType.PARAGRAPH
+
+
+def test_label_line_after_plan_items_is_its_own_paragraph() -> None:
+    raw = plain(
+        "Reja:\n2.1. Pul aylanmasi\n2.2. Naqd pul muomalasi\n"
+        "Tayanch iboralar: pul aylanmasi, toʻlov, naqd pul."
+    )
+    blocks = build_blocks([raw])
+    assert blocks[-1].type is BlockType.PARAGRAPH
+    assert blocks[-1].text.startswith("Tayanch iboralar:")
+    assert blocks[-2].extra["items"][-1] == "2.2. Naqd pul muomalasi"
+
+
+def test_repeated_section_title_before_a_unique_article_stays_a_heading() -> None:
+    raws = []
+    for chapter, article in ((1, 1), (2, 7)):
+        raws += [
+            heading(f"{chapter}-bob. Bob nomi {chapter}"),
+            heading("1-§. Umumiy qoidalar", size=11.0),
+            heading(f"{article}-modda. Modda nomi {article}", size=11.0),
+            body(UZ_BODY),
+        ]
+    headings = [b.text for b in build_blocks(raws) if b.type is BlockType.HEADING]
+    assert headings.count("1-§. Umumiy qoidalar") == 2
+
+
+def spaced(raw: RawBlock) -> RawBlock:
+    raw.spaced = True
+    return raw
+
+
+def levels_of(raws: list[RawBlock]) -> list[tuple[str, int | None]]:
+    return [(b.text, b.level) for b in build_blocks(raws) if b.type is BlockType.HEADING]
+
+
+def test_unnumbered_heading_styled_like_sections_nests_under_the_chapter() -> None:
+    raws = [
+        heading("1-MAVZU: PUL VA KREDIT"),
+        heading("1.1. Pulning mohiyati", size=11.0),
+        body(UZ_BODY),
+        spaced(heading("Nazorat savollari", size=11.0)),
+        body(UZ_BODY),
+        heading("2-MAVZU: BANK TIZIMI"),
+        body(UZ_BODY),
+    ]
+    assert levels_of(raws) == [
+        ("1-MAVZU: PUL VA KREDIT", 1),
+        ("1.1. Pulning mohiyati", 2),
+        ("Nazorat savollari", 2),
+        ("2-MAVZU: BANK TIZIMI", 1),
+    ]
+
+
+def test_unnumbered_heading_of_an_unknown_style_sits_inside_the_chapter() -> None:
+    raws = [
+        heading("1-MAVZU: PUL VA KREDIT"),
+        body(UZ_BODY),
+        spaced(heading("Tayanch tushunchalar", size=12.0)),
+        body(UZ_BODY),
+    ]
+    assert levels_of(raws) == [("1-MAVZU: PUL VA KREDIT", 1), ("Tayanch tushunchalar", 2)]
+
+
+def test_unnumbered_chapter_like_heading_stays_at_the_top() -> None:
+    raws = [
+        heading("KIRISH"),
+        body(UZ_BODY),
+        heading("1-MAVZU: PUL VA KREDIT"),
+        body(UZ_BODY),
+    ]
+    assert levels_of(raws) == [("KIRISH", 1), ("1-MAVZU: PUL VA KREDIT", 1)]
+
+
+def test_numbers_restarting_inside_a_section_nest_under_it() -> None:
+    raws = [
+        heading("6-MAVZU: VALYUTA SIYOSATI"),
+        heading("6.2. Valyuta risklari", size=11.0),
+        body(UZ_BODY),
+        heading("1. Valyuta risklarini baholash", size=11.0),
+        body(UZ_BODY),
+        heading("2. Valyuta risklarini kamaytirish", size=11.0),
+        body(UZ_BODY),
+    ]
+    levels = dict(levels_of(raws))
+    assert levels["1. Valyuta risklarini baholash"] == levels["6.2. Valyuta risklari"] + 1
+    assert levels["2. Valyuta risklarini kamaytirish"] == levels["6.2. Valyuta risklari"] + 1
+
+
+def test_levels_have_no_gaps() -> None:
+    raws = [
+        heading("1-MAVZU: PUL VA KREDIT"),
+        heading("1.1.1. Pulning paydo boʻlishi", size=11.0),
+        body(UZ_BODY),
+    ]
+    assert [level for _, level in levels_of(raws)] == [1, 2]
+
+
+def test_unnumbered_heading_as_big_as_the_chapters_but_unlike_them_nests_inside() -> None:
+    raws = [
+        heading("5-MAVZU: QIMMATLI QOGʻOZLAR BOZORI"),
+        body(UZ_BODY),
+        spaced(heading("Tayanch iboralar")),
+        body(UZ_BODY),
+        heading("6-MAVZU: MASOFAVIY BANK XIZMATLARI"),
+    ]
+    assert dict(levels_of(raws))["Tayanch iboralar"] == 2
+
+
+def table(page: int = 1, bbox: tuple[float, float, float, float] = (70, 340, 530, 640)) -> RawBlock:
+    return RawBlock(
+        text="", page=page, bbox=bbox, rows=[["Davlat", "Valyuta"], ["Armaniston", "Rubl"]]
+    )
+
+
+def at(raw: RawBlock, y0: float, y1: float) -> RawBlock:
+    raw.bbox = (100.0, y0, 500.0, y1)
+    return raw
+
+
+def kinds(raws: list[RawBlock]) -> list[tuple[str, str | None]]:
+    return [(b.type.value, b.extra.get("role")) for b in build_blocks(raws)]
+
+
+def test_formula_is_not_a_heading() -> None:
+    raws = [spaced(heading("M = APS x I", size=11.0)), body(UZ_BODY)]
+    assert kinds(raws)[0] == ("paragraph", None)
+
+
+def test_heading_with_an_equals_sign_in_words_stays_a_heading() -> None:
+    raws = [heading("Foiz marjasi = daromadlar va xarajatlar farqi"), body(UZ_BODY)]
+    assert kinds(raws)[0] == ("heading", None)
+
+
+def test_line_right_above_a_table_is_its_caption() -> None:
+    raws = [
+        at(spaced(heading("Sobiq ittifoq davlatlari valyutalari, 1993-yil", size=11.0)), 300, 318),
+        table(),
+        body(UZ_BODY),
+    ]
+    assert kinds(raws)[0] == ("paragraph", "caption")
+
+
+def test_line_right_above_a_figure_is_its_caption() -> None:
+    figure = RawBlock(
+        text="Xalqaro daraja | Milliy daraja", page=1, bbox=(85, 392, 400, 620), role="figure"
+    )
+    raws = [at(spaced(heading("Valyuta munosabatlari darajalari", size=11.0)), 348, 365), figure]
+    assert kinds(raws)[0] == ("paragraph", "caption")
+
+
+def test_big_heading_above_a_table_stays_a_heading() -> None:
+    raws = [at(heading("KIRISH"), 300, 318), table(), body(UZ_BODY)]
+    assert kinds(raws)[0] == ("heading", None)
+
+
+def test_heading_followed_by_body_text_is_not_a_caption() -> None:
+    raws = [spaced(heading("Valyuta munosabatlari darajalari", size=11.0)), body(UZ_BODY), table()]
+    assert kinds(raws)[0] == ("heading", None)
+
+
+def test_text_inside_a_table_frame_is_not_a_heading() -> None:
+    raws = [table(), at(spaced(heading("Xulosa", size=11.0)), 600, 615), body(UZ_BODY)]
+    assert kinds(raws)[1] == ("paragraph", None)
+
+
+def test_numbered_run_in_title_is_the_first_line_of_its_paragraph() -> None:
+    raws = [
+        heading("2. Tadbirkorlikni ragʻbatlantirish. Soliq", size=11.0),
+        body(
+            "tizimi xoʻjalik yurituvchi subyektlarni, jumladan, chet el subyektlarini ham ishlab "
+            "chiqarishni rivojlantirishga undashi lozim."
+        ),
+        heading("3. Adolatlilik tamoyili. Adolat tamoyil-", size=11.0),
+        body("lariga muvofiq soliqlar jamiyat tomonidan adolatli deb tan olinadi."),
+    ]
+    assert not [t for t, _ in kinds(raws) if t == "heading"]
+
+
+def test_short_heading_before_a_capitalized_paragraph_stays_a_heading() -> None:
+    raws = [spaced(heading("2.1. Pul aylanmasi", size=11.0)), body(UZ_BODY)]
+    assert kinds(raws)[0] == ("heading", None)
+
+
+def stacked(
+    texts: list[str], size: float = 14.0, bold: float = 1.0, top: float = 100.0
+) -> list[RawBlock]:
+    """Lines one under another, centered, each its own block."""
+    return [
+        RawBlock(
+            text=t,
+            page=1,
+            font_size=size,
+            bold=bold,
+            bbox=(150.0, top + 18 * i, 450.0, top + 18 * i + 15),
+        )
+        for i, t in enumerate(texts)
+    ]
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ["5.3. Banklarning qimmatli qogʻozlar boʻyicha tijorat va", "investitsiya faoliyati"],
+        [
+            "1-MAVZU: KIRISH (BANK ISHI VA MOLIYA ASOSLARI",
+            "FANINING ASOSIY VAZIFALARI,",
+            "PREDMETI VA OBYEKTI)",
+        ],
+        [
+            "3.3. Markaziy bankning funksiyalari: emission funksiya,",
+            "banklarning banki funksiyasi,",
+            "hukumatning banki funksiyasi va",
+            "pul-kredit siyosati",
+        ],
+    ],
+)
+def test_heading_over_several_lines_is_one_heading(lines: list[str]) -> None:
+    raws = [*stacked(lines), body(UZ_BODY)]
+    blocks = build_blocks(raws)
+    assert blocks[0].type is BlockType.HEADING and blocks[0].text == " ".join(lines)
+    assert blocks[1].text == UZ_BODY
+
+
+def test_bold_first_body_line_is_not_joined_to_the_heading() -> None:
+    raws = [
+        *stacked(["2.1. Pul aylanmasi"]),
+        *stacked(["Pul aylanmasi muhim jarayon."], top=118.0),
+        body(UZ_BODY),
+    ]
+    blocks = build_blocks(raws)
+    assert blocks[0].text == "2.1. Pul aylanmasi"
+
+
+def test_title_above_formula_debris_is_a_caption() -> None:
+    formula = RawBlock(
+        text="A Sˆ C = 0", page=1, font_size=11.0, role="formula", bbox=(60, 214, 300, 266)
+    )
+    raws = [at(spaced(heading("FAM", size=14.0)), 181, 201), formula, body(UZ_BODY)]
+    blocks = build_blocks(raws)
+    assert not [b for b in blocks if b.type is BlockType.HEADING]
+
+
+def test_sentence_split_by_a_displayed_formula_is_joined() -> None:
+    formula = RawBlock(text="Y = C + I + G", page=1, font_size=11.0, role="formula")
+    raws = [
+        body("Yalpi talab quyidagi formula orqali"),
+        formula,
+        body("hisoblanadi va tahlil qilinadi."),
+    ]
+    texts = [b.text for b in build_blocks(raws)]
+    assert "Yalpi talab quyidagi formula orqali hisoblanadi va tahlil qilinadi." in texts

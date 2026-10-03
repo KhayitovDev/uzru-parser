@@ -305,3 +305,16 @@ def test_lead_in_alone_after_a_heading_is_not_moved() -> None:
     doc = make_doc(head("1. ОБЩИЕ ПОЛОЖЕНИЯ", 1), para("Проверьте:"), items(12))
     chunks = Chunker(max_tokens=100, overlap=0).chunk(doc)
     assert chunks[0].text.startswith("1. ОБЩИЕ ПОЛОЖЕНИЯ\n\nПроверьте:\n\n• пункт номер 0")
+
+
+def test_formula_blocks_never_form_a_chunk_of_their_own() -> None:
+    formula = Block(type=BlockType.PARAGRAPH, text="= p& 0 G &", page=1, extra={"role": "formula"})
+    doc = make_doc(
+        head("1. ОБЩИЕ ПОЛОЖЕНИЯ", 1),
+        para(sentences(6)),
+        formula,
+        head("2. ПРАВА", 1),
+        para("Текст."),
+    )
+    chunks = Chunker(max_tokens=100, overlap=0).chunk(doc)
+    assert all(c.text.strip() != formula.text for c in chunks)

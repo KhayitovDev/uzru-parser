@@ -31,7 +31,12 @@ fn bare_lowercase(word: &str) -> String {
         .collect()
 }
 
-const BULLETS: &[char] = &['•', '·', '▪', '●', '○', '■', '◦', '–', '—', '-', '*'];
+const BULLETS: &[char] = &[
+    '•', '·', '▪', '●', '○', '■', '◦', '–', '—', '-', '*', '✓', '✔', '➢', '➤', '►', '▶', '◆', '❖',
+    '□',
+];
+/// Opening quotes and brackets a title may start with when glued to its number: "5.“Umumiy".
+const OPENING: &[char] = &['“', '«', '„', '"', '(', '‘', '\''];
 
 /// Leading alphabetic word, lowercased and without apostrophes, plus the text after it.
 fn leading_word(text: &str) -> (String, &str) {
@@ -138,11 +143,14 @@ fn decimal_depth(text: &str) -> Option<usize> {
             rest = after_dot;
         }
     }
-    // "5.3.Title": a title glued to the final dot.
-    let glued_title = trailing_dot && rest.starts_with(char::is_alphabetic);
+    // "5.3.Title", "5.“Title": a title glued to the final dot.
+    let glued_title =
+        trailing_dot && rest.starts_with(|c: char| c.is_alphabetic() || OPENING.contains(&c));
     let has_title =
         (rest.starts_with(char::is_whitespace) || glued_title) && !rest.trim().is_empty();
-    (has_title && (trailing_dot || groups > 1)).then_some(groups)
+    // Without a final dot, "1.25 foiz" is a number in running text; "5.3 Title" a section.
+    let titled = trailing_dot || rest.trim_start().starts_with(|c: char| !c.is_lowercase());
+    (has_title && titled && (trailing_dot || groups > 1)).then_some(groups)
 }
 
 /// Roman numeral followed by a dot and a title: "I. Общие положения". A lone Cyrillic "Х."
@@ -246,6 +254,15 @@ mod tests {
     fn info(s: &str) -> Option<(&'static str, usize)> {
         install_keywords();
         numbering_info(s).map(|n| (n.kind, n.depth))
+    }
+
+    #[test]
+    fn glued_markers_check_marks_and_running_decimals() {
+        assert_eq!(info("5.“Umumiy qoidalar”"), Some(("decimal", 1)));
+        assert_eq!(info("1.Qiymat"), Some(("decimal", 1)));
+        assert_eq!(info("✓ Valyuta riski"), Some(("bullet", 1)));
+        assert_eq!(info("1.25 foiz miqdorida"), None);
+        assert_eq!(info("5.3 Banklarning turlari"), Some(("decimal", 2)));
     }
 
     #[test]

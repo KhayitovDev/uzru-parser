@@ -4,10 +4,12 @@ from uzru_parser.paragraphs import (
     build_paragraphs,
     figure_labels,
     figure_regions,
+    group_formula_debris,
     join_spread_lines,
     layout_stats,
     merge_row_fragments,
 )
+from uzru_parser.structure import RawBlock
 
 SIZE = 11.0
 PITCH = 14.2  # line height 13.2 + typical gap 1.0
@@ -254,3 +256,196 @@ def test_row_pieces_that_do_not_fill_the_line_stay_apart() -> None:
 def test_spread_row_without_running_text_around_it_stays_apart() -> None:
     row = spread_row([("Birinchi", 72, 140), ("Ikkinchi", 230, 300), ("Uchinchi", 430, 500)], 100)
     assert join_spread_lines(row, 500.0) == row
+
+
+def test_spread_first_line_before_a_short_last_line_is_rebuilt() -> None:
+    row = spread_row(
+        [
+            ("Kreditning", 100, 160),
+            ("toʻlovliligi", 210, 280),
+            ("nafaqat", 330, 390),
+            ("balki", 450, 500),
+        ],
+        100,
+    )
+    lines = [*row, line("korxonalarning foydasiga bogʻliq boʻladi.", 100 + PITCH, x1=300)]
+    assert [x.text for x in join_spread_lines(lines, 500.0)] == [
+        "Kreditning toʻlovliligi nafaqat balki",
+        lines[-1].text,
+    ]
+
+
+def test_two_spread_lines_in_a_row_are_both_rebuilt() -> None:
+    first = spread_row(
+        [
+            ("boshlanishi", 72, 140),
+            ("deb", 200, 220),
+            ("hisoblash,", 290, 360),
+            ("hamda", 440, 500),
+        ],
+        100,
+    )
+    second = spread_row(
+        [("yoki", 72, 100), ("pullik", 170, 210), ("asosida", 290, 350), ("binoan", 430, 500)],
+        114.2,
+    )
+    joined = join_spread_lines([*first, *second], 500.0)
+    assert [x.text for x in joined] == [
+        "boshlanishi deb hisoblash, hamda",
+        "yoki pullik asosida binoan",
+    ]
+
+
+def test_diagram_boxes_with_several_words_stay_apart() -> None:
+    boxes = spread_row(
+        [("Milliy oltin", 72, 150), ("Maxsus fondlar", 230, 330), ("XVFdagi zahira", 420, 500)],
+        100 + PITCH,
+    )
+    lines = [line("Matn diagrammadan oldin turibdi va davom etadi", 100), *boxes]
+    assert join_spread_lines(lines, 500.0) == lines
+
+
+def test_spread_first_line_of_a_list_item_is_rebuilt() -> None:
+    row = spread_row(
+        [
+            ("5. Shartnoma", 72, 150),
+            ("yoki", 200, 225),
+            ("pullik", 275, 390),
+            ("asosida", 440, 500),
+        ],
+        100,
+    )
+    lines = [*row, line("topshirigʻiga binoan taʼminlash:", 100 + PITCH, x0=90, x1=300)]
+    assert [x.text for x in join_spread_lines(lines, 500.0)][
+        0
+    ] == "5. Shartnoma yoki pullik asosida"
+
+
+def test_indented_first_line_after_a_one_line_paragraph_starts_a_new_paragraph() -> None:
+    lines = [
+        line("Darslik oliy taʼlim muassasalari talabalari uchun tayyorlangan.", 100, x0=100),
+        line(
+            "Darslikda bank ishiga taalluqli savollar va javoblar bilan birgalikda har", 114.2, 100
+        ),
+        line("bir boʻlim boʻyicha tayanch iboralar keltirilgan.", 128.4, x1=350),
+    ]
+    assert texts(lines) == [
+        lines[0].text,
+        lines[1].text + "\n" + lines[2].text,
+    ]
+
+
+def test_indented_block_quote_stays_one_paragraph() -> None:
+    lines = [
+        line("Birinchi qator iqtibos matni shu yerda boshlanadi.", 100, x0=100),
+        line("ikkinchi qator ham xuddi shunday chekinish bilan davom etadi va", 114.2, x0=100),
+        line("uchinchi qator ham shu chekinishda tugaydi.", 128.4, x0=100, x1=350),
+    ]
+    assert len(texts(lines)) == 1
+
+
+def test_bold_run_in_term_stays_with_its_plain_continuation() -> None:
+    lines = [
+        line("Naqdsiz pul aylanmasi – bu pul mablagʻlarining", 100, x0=100, bold=0.8),
+        line("hisobvaraqlar orqali harakatlanishidir.", 114.2, x1=300),
+    ]
+    assert len(texts(lines)) == 1
+
+
+def test_fully_bold_line_does_not_run_into_plain_text() -> None:
+    lines = [
+        line("NAQDSIZ PUL AYLANMASI VA UNING TURLARI", 100, x0=100, bold=1.0),
+        line("hisobvaraqlar orqali harakatlanishidir.", 114.2, x1=300),
+    ]
+    assert len(texts(lines)) == 2
+
+
+def test_text_inside_a_labelled_drawing_belongs_to_the_figure() -> None:
+    region = (100.0, 400.0, 500.0, 600.0)
+    lines = [
+        line("Matn grafikdan oldin turibdi va davom etadi", 100),
+        line("Foiz marjasining yillar boʻyicha oʻzgarishi va uning asosiy omillari", 410, x0=110),
+        line("Risklar", 450, x0=120, x1=170),
+        line("Kredit", 450, x0=250, x1=300),
+        line("Foiz", 520, x0=400, x1=430),
+    ]
+    blocks = build_paragraphs(lines, 1, STATS, [region])
+    title = next(b for b in blocks if b.text.startswith("Foiz marjasining"))
+    assert title.in_figure and not blocks[0].in_figure
+
+
+def test_lone_list_marker_is_joined_to_its_text() -> None:
+    merged = merge_row_fragments(
+        [line("1)", 100, x0=72, x1=85), line("toʻlovchi hisobidan", 100, x0=110)]
+    )
+    assert [m.text for m in merged] == ["1) toʻlovchi hisobidan"]
+    checks = merge_row_fragments([line("✓", 100, x0=72, x1=80), line("Valyuta riski", 100, x0=95)])
+    assert [m.text for m in checks] == ["✓ Valyuta riski"]
+
+
+def test_marker_inside_a_sentence_is_not_joined_across_rows() -> None:
+    merged = merge_row_fragments([line("1)", 100, x0=72, x1=85), line("keyingi qator", 130, x0=72)])
+    assert len(merged) == 2
+
+
+def test_dash_continuing_a_sentence_is_not_a_list_item() -> None:
+    lines = [
+        line("Fan bank ishi taʼlim yoʻnalishi talabalari uchun 2", 100),
+        line("– semestrda oʻqitiladi va yakuniy nazorat bilan tugaydi.", 100 + PITCH, x1=420),
+    ]
+    assert len(texts(lines)) == 1
+
+
+def test_dash_list_after_a_lead_in_stays_a_list() -> None:
+    lines = [
+        line("Bank quyidagi vazifalarni bajaradi:", 100, x1=300),
+        line("– omonatlarni qabul qiladi;", 100 + PITCH, x1=250),
+        line("– kredit beradi.", 100 + 2 * PITCH, x1=200),
+    ]
+    assert len(texts(lines)) == 3
+
+
+def raw(text: str, page: int = 1) -> RawBlock:
+    return RawBlock(text=text, page=page, font_size=SIZE)
+
+
+def test_formula_fragments_become_one_formula_block() -> None:
+    blocks = [
+        raw("Grafikda talab egri chizigʻi koʻrsatilgan."),
+        raw("="),
+        raw("p&"),
+        raw("0"),
+        raw("G &"),
+    ]
+    grouped = group_formula_debris(blocks)
+    assert [(b.text, b.role) for b in grouped] == [
+        ("Grafikda talab egri chizigʻi koʻrsatilgan.", None),
+        ("= p& 0 G &", "formula"),
+    ]
+
+
+def test_short_words_and_sentences_are_not_formula_debris() -> None:
+    blocks = [
+        raw("Xulosa."),
+        raw("Ha, albatta."),
+        raw("Foiz stavkasi = 12 foiz, inflyatsiya = 8 foiz"),
+    ]
+    assert [b.role for b in group_formula_debris(blocks)] == [None, None, None]
+
+
+def test_inline_formula_stays_in_its_sentence() -> None:
+    merged = merge_row_fragments(
+        [
+            line("Bunda tenglama", 100, x0=72, x1=170),
+            line("x = 5", 100, x0=180, x1=215),
+            line("boʻlganda bajariladi.", 100, x0=225, x1=360),
+        ]
+    )
+    assert [m.text for m in merged] == ["Bunda tenglama x = 5 boʻlganda bajariladi."]
+
+
+def test_code_lines_are_not_formulas() -> None:
+    assert [b.role for b in group_formula_debris([raw("def f(x=[]):"), raw("a = {1: 2};")])] == [
+        None,
+        None,
+    ]
