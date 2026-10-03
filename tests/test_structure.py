@@ -1031,3 +1031,128 @@ def test_sentence_split_by_a_displayed_formula_is_joined() -> None:
     ]
     texts = [b.text for b in build_blocks(raws)]
     assert "Yalpi talab quyidagi formula orqali hisoblanadi va tahlil qilinadi." in texts
+
+
+@pytest.mark.parametrize("text", ["B FAM", "FAM’’", "Sˆ C", "G &"])
+def test_letters_and_short_tokens_are_never_a_heading(text: str) -> None:
+    raws = [spaced(heading(text)), body(UZ_BODY)]
+    assert kinds(raws)[0][0] != "heading"
+
+
+@pytest.mark.parametrize("text", ["KIRISH", "XULOSA", "ВВЕДЕНИЕ", "II-BOB. PUL"])
+def test_short_real_headings_stay_headings(text: str) -> None:
+    raws = [spaced(heading(text)), body(UZ_BODY)]
+    assert kinds(raws)[0] == ("heading", None)
+
+
+PLAN_TITLES = ["4.1. Bank risklari tizimi", "4.2. Kredit riski mazmuni", "4.3. Foiz riski"]
+
+
+@pytest.mark.parametrize("together", [False, True])
+def test_last_plan_item_goes_with_the_plain_ones_before_it(together: bool) -> None:
+    plan = [body("\n".join(PLAN_TITLES[:2]))] if together else [body(t) for t in PLAN_TITLES[:2]]
+    raws = [
+        heading("4-MAVZU: BANK RISKLARI"),
+        *plan,
+        spaced(heading(PLAN_TITLES[2], size=11.0)),
+        *[
+            block
+            for title in PLAN_TITLES
+            for block in (spaced(heading(title, size=11.0)), body(UZ_BODY))
+        ],
+    ]
+    headings = [b.text for b in build_blocks(raws) if b.type is BlockType.HEADING]
+    assert headings == ["4-MAVZU: BANK RISKLARI", *PLAN_TITLES]
+
+
+def test_colon_label_without_text_before_the_next_heading_is_not_a_heading() -> None:
+    raws = [
+        spaced(heading("Xulosa:", size=11.0)),
+        spaced(heading("9.2. Keyingi boʻlim", size=11.0)),
+        body(UZ_BODY),
+    ]
+    assert kinds(raws)[0] == ("paragraph", None)
+
+
+def test_colon_heading_followed_by_its_text_stays_a_heading() -> None:
+    raws = [heading("UMUMIY QOIDALAR:"), body(UZ_BODY)]
+    assert kinds(raws)[0] == ("heading", None)
+
+
+def test_open_title_joins_its_next_line_despite_a_small_style_difference() -> None:
+    first = RawBlock(
+        text="6.2. Masofaviy bank xizmatlarining vujudga kelishi va",
+        page=1,
+        font_size=14.0,
+        bold=1.0,
+        bbox=(100, 100, 500, 116),
+    )
+    second = RawBlock(
+        text="rivojlanish bosqichlari", page=1, font_size=13.0, bold=0.7, bbox=(200, 136, 400, 151)
+    )
+    blocks = build_blocks([first, second, body(UZ_BODY)])
+    assert (
+        blocks[0].text
+        == "6.2. Masofaviy bank xizmatlarining vujudga kelishi va rivojlanish bosqichlari"
+    )
+
+
+def test_finished_title_does_not_take_a_differently_styled_next_line() -> None:
+    first = RawBlock(
+        text="6.2. Masofaviy bank xizmatlari",
+        page=1,
+        font_size=14.0,
+        bold=1.0,
+        bbox=(100, 100, 500, 116),
+    )
+    second = RawBlock(
+        text="Bank xizmatlari turlari", page=1, font_size=13.0, bold=0.7, bbox=(200, 136, 400, 151)
+    )
+    blocks = build_blocks([first, second, body(UZ_BODY)])
+    assert blocks[0].text == "6.2. Masofaviy bank xizmatlari"
+
+
+def test_recurring_heading_text_gets_one_decision() -> None:
+    raws = [
+        spaced(heading("Nazorat uchun savollar", size=11.0)),
+        body(UZ_BODY),
+        heading("Nazorat uchun savollar.", size=11.0),  # no space above on this page
+        body(UZ_BODY),
+    ]
+    assert [t for t, _ in kinds(raws)] == ["heading", "paragraph", "heading", "paragraph"]
+
+
+def test_same_words_in_plain_body_style_stay_a_paragraph() -> None:
+    raws = [
+        spaced(heading("Nazorat uchun savollar", size=11.0)),
+        body(UZ_BODY),
+        body("Nazorat uchun savollar."),
+        body(UZ_BODY),
+    ]
+    assert [t for t, _ in kinds(raws)] == ["heading", "paragraph", "paragraph", "paragraph"]
+
+
+def test_rival_chapter_words_share_the_top_level() -> None:
+    raws = [
+        heading("I-BOB. PUL NAZARIYASI"),
+        heading("1.1. Pulning kelib chiqishi", size=11.0),
+        body(UZ_BODY),
+        heading("II-BOB. MARKAZIY BANK"),
+        body(UZ_BODY),
+        heading("8-МАВЗУ. МАТЕМАТИК ИЛОВА"),
+        body(UZ_BODY),
+    ]
+    levels = dict(levels_of(raws))
+    assert levels["I-BOB. PUL NAZARIYASI"] == levels["8-МАВЗУ. МАТЕМАТИК ИЛОВА"] == 1
+    assert levels["1.1. Pulning kelib chiqishi"] == 2
+
+
+def test_chapter_words_that_nest_keep_their_order() -> None:
+    raws = [
+        heading("I BOʻLIM. UMUMIY"),
+        heading("1-bob. Asosiy"),
+        body(UZ_BODY),
+        heading("2-bob. Qoʻshimcha"),
+        body(UZ_BODY),
+    ]
+    assert [level for _, level in levels_of(raws)] == [1, 2, 2]

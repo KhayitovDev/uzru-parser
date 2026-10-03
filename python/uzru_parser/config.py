@@ -70,6 +70,9 @@ LINE_LEVEL_BLOCKS = 0.7
 #: Widest gap, in font sizes, between the pieces of one justified line that the PDF stores as
 #: separate lines because of its wide word spacing.
 SPREAD_LINE_GAP = 8.0
+#: Font sizes differing by at most this share are the same size (a bold run may report a
+#: slightly different one).
+SAME_SIZE_TOLERANCE = 0.05
 
 # --- Figures --------------------------------------------------------------------------------
 
@@ -85,6 +88,12 @@ FIGURE_MIN_LABELS = 2
 FIGURE_MIN_LABELS_WITHOUT_DRAWING = 4
 #: Labels of a figure without drawings have at most this many words.
 FIGURE_FREE_LABEL_WORDS = 3
+#: A filled rectangle at most this many font sizes tall behind one row of text is line
+#: shading, not a drawing.
+SHADING_MAX_HEIGHT = 2.0
+#: A drawing region whose lines are at least this share of long body lines holds running
+#: text (a shaded or framed area), not a figure.
+FIGURE_TEXT_SHARE = 0.6
 
 # --- Headings -------------------------------------------------------------------------------
 
@@ -106,12 +115,24 @@ UPPERCASE_SHARE = 0.9
 MIN_LETTER_SHARE = 0.5
 #: Distinct signals (numbering, bigger font, bold, capitals, space above) a heading needs.
 MIN_HEADING_SIGNALS = 2
+#: DOCX: a paragraph at least this bold, of at most DOCX_SUBHEADING_WORDS words and without a
+#: final full stop, followed by plain text, is a subheading.
+DOCX_BOLD_HEADING_SHARE = 0.95
+DOCX_SUBHEADING_WORDS = 15
+#: DOCX: space above a paragraph this many times the body's marks it as set apart.
+DOCX_SPACED_RATIO = 1.5
+#: An unnumbered heading holds at least one word of this many letters; single letters and
+#: short tokens (chart labels such as "B FAM") never make one.
+HEADING_MIN_WORD_LETTERS = 4
 #: Space above a block, in font sizes beyond the typical line gap, that sets it apart.
 HEADING_SPACE_ABOVE = 0.8
 MAX_LEVEL = 6
 #: Wrapped heading continuation: longest second part and largest gap (in line heights).
 MAX_CONTINUATION_CHARS = 100
 CONTINUATION_GAP = 1.5
+#: A title left open (ending with a comma or a joining word) may go on this many times
+#: further down.
+OPEN_TITLE_GAP_FACTOR = 2.0
 #: Words that cannot end a title, so a heading ending with one goes on in the next line
 #: (Uzbek Latin and Cyrillic, Russian, English). Optional: style and spacing work without it.
 JOINING_WORDS: tuple[str, ...] = (
@@ -222,6 +243,8 @@ TITLE_PAGE_MIN_PAGES = 3
 TOC_LINE_SHARE = 0.4
 TOC_BLOCK_SHARE = 0.5
 TOC_MIN_ENTRIES = 3
+#: The line above a contents run with at most this many words is its title.
+TOC_TITLE_WORDS = 3
 #: Share of page-number pairs that must not decrease on a contents page.
 TOC_ASCENDING_SHARE = 0.8
 #: Untitled contents are only looked for in this share of pages at each end of the book.
@@ -241,6 +264,8 @@ RUNNING_TEXT_ROWS = 0.5
 HEADER_ROWS = 3
 #: Only pages with this many vector paths are searched for tables (find_tables is slow).
 MIN_RULING_PATHS = 4
+#: Tolerance, as a share of the table's height, when matching its ruling lines to its edges.
+TABLE_RULE_SLACK = 0.01
 
 # --- Language and chunks --------------------------------------------------------------------
 

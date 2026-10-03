@@ -449,3 +449,116 @@ def test_code_lines_are_not_formulas() -> None:
         None,
         None,
     ]
+
+
+def test_chart_fragment_between_formula_blocks_joins_them() -> None:
+    blocks = [raw("Matn grafikdan oldin."), raw("= 0"), raw("B FAM"), raw("p& G")]
+    grouped = group_formula_debris(blocks)
+    assert [(b.text, b.role) for b in grouped] == [
+        ("Matn grafikdan oldin.", None),
+        ("= 0 B FAM p& G", "formula"),
+    ]
+
+
+def test_sentence_between_formula_blocks_stays_a_paragraph() -> None:
+    blocks = [raw("= 0"), raw("Bu yerda talab egri chizigʻi siljiydi."), raw("p& G")]
+    assert [b.role for b in group_formula_debris(blocks)] == ["formula", None, "formula"]
+
+
+def test_justified_line_opening_with_bold_words_is_rebuilt_and_kept_with_its_paragraph() -> None:
+    row = [
+        line("Naqdsiz pul", 100 + PITCH, x0=100, x1=175, bold=1.0, size=SIZE + 0.3),
+        line("aylanmasi", 100 + PITCH, x0=215, x1=275),
+        line("–", 100 + PITCH, x0=315, x1=322),
+        line("bu pul mablagʻlarining", 100 + PITCH, x0=362, x1=500),
+    ]
+    lines = [
+        line(
+            "Pul aylanmasi haqida gapirganda quyidagi tushunchalarni ajratish lozim.", 100, x1=480
+        ),
+        *row,
+        line(
+            "toʻlovchining hisobvaragʻidan oluvchining hisobiga oʻtkazilishidir.",
+            100 + 2 * PITCH,
+            x1=420,
+        ),
+    ]
+    assert texts(lines)[1] == (
+        "Naqdsiz pul aylanmasi – bu pul mablagʻlarining\n"
+        "toʻlovchining hisobvaragʻidan oluvchining hisobiga oʻtkazilishidir."
+    )
+
+
+def test_first_line_rule_works_on_a_page_in_a_smaller_font() -> None:
+    small = SIZE - 2
+    lines = [
+        line(
+            "Darslik oliy taʼlim muassasalari talabalari uchun tayyorlangan.",
+            100,
+            x0=100,
+            size=small,
+        ),
+        line(
+            "Darslikda bank ishiga taalluqli savollar va javoblar bilan har",
+            112,
+            x0=100,
+            size=small,
+        ),
+        line("bir boʻlim boʻyicha tayanch iboralar keltirilgan.", 124, x1=350, size=small),
+        line(
+            "Ushbu darslik oʻquv rejasi asosida tuzilgan boʻlib, unda nazariy",
+            136,
+            x0=100,
+            size=small,
+        ),
+        line("va amaliy masalalar birgalikda yoritilgan.", 148, x1=330, size=small),
+    ]
+    assert texts(lines) == [
+        lines[0].text,
+        lines[1].text + "\n" + lines[2].text,
+        lines[3].text + "\n" + lines[4].text,
+    ]
+
+
+def test_raised_formula_pieces_join_the_sentence_in_reading_order() -> None:
+    lines = [
+        line("0 = R C", 96, x0=262, x1=300, size=SIZE - 2),  # raised and sorted first
+        line("Bu yerda va keyin muvozanat chizigʻi FAM", 100, x0=72, x1=255),
+        line("G &", 104, x0=306, x1=322, size=SIZE - 2),
+        line("holati uchun chizilgan.", 100, x0=328, x1=450),
+    ]
+    merged = merge_row_fragments(lines)
+    assert [m.text for m in merged] == [
+        "Bu yerda va keyin muvozanat chizigʻi FAM 0 = R C G & holati uchun chizilgan."
+    ]
+
+
+def test_formula_on_its_own_line_below_a_sentence_stays_apart() -> None:
+    lines = [
+        line("Bu yerda muvozanat chizigʻi quyidagicha yoziladi:", 100, x1=360),
+        line("Y = C + I", 100 + 2 * PITCH, x0=200, x1=260),
+    ]
+    assert [m.text for m in merge_row_fragments(lines)] == [lines[0].text, lines[1].text]
+
+
+def test_short_last_line_of_a_paragraph_is_never_a_label() -> None:
+    region = (60.0, 90.0, 510.0, 400.0)
+    lines = [
+        line("M0 – Markaziy bank tomonidan muomalaga chiqarilgan jami", 100),
+        line("naqd pullar", 100 + PITCH, x1=150),
+        line("Germaniya", 200, x0=100, x1=160),
+        line("Fransiya", 200, x0=250, x1=310),
+        line("Rossiya", 260, x0=100, x1=160),
+    ]
+    labels = figure_labels(lines, [region], SIZE, 500.0)
+    assert 1 not in labels and {2, 3, 4} <= labels
+
+
+def test_short_line_after_a_finished_sentence_can_still_be_a_label() -> None:
+    region = (60.0, 90.0, 510.0, 400.0)
+    lines = [
+        line("Quyidagi chizmada mamlakatlar boʻyicha koʻrsatkichlar berilgan.", 100),
+        line("Germaniya", 100 + PITCH, x1=150),
+        line("Fransiya", 200, x0=250, x1=310),
+    ]
+    assert 1 in figure_labels(lines, [region], SIZE, 500.0)

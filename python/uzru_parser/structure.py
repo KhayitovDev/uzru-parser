@@ -42,6 +42,7 @@ LEADING_NUMBER = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,3})*)")
 LEADING_ROMAN = re.compile(r"^\s*([IVXLC\u0406\u0425]{1,6})\b")
 TOC_ENTRY = re.compile(r"^(?P<title>.*?)(?:\s*(?:…|\.{3,}))?\s*(?P<page>\d{1,4})?\s*$")
 REAL_WORD = re.compile(r"[^\W\d_]{3,}")
+HEADING_WORD = re.compile(rf"[^\W\d_]{{{config.HEADING_MIN_WORD_LETTERS},}}")
 FORMULA_OPERATOR = re.compile(r"[=<>±×÷∑∏√∫≈≠≤≥]")
 #: "Key terms: ...": a label of a few words and a colon opening a line.
 LABEL_START = re.compile(r"^\s*([^\W\d_]+(?:\s+[^\W\d_]+){0,3})\s*:(?:\s|$)")
@@ -140,7 +141,13 @@ def build_blocks(
         elif raw.footnote:
             blocks.append(_footnote_block(raw, text))
         elif heading is not None:
-            if previous is not None and _continues_heading(blocks[-1], previous, raw, text):
+            # A reader without page layout (DOCX) gives each paragraph on its own: two
+            # headings in a row are two headings.
+            if (
+                page_layout
+                and previous is not None
+                and _continues_heading(blocks[-1], previous, raw, text)
+            ):
                 blocks[-1].text = f"{blocks[-1].text} {_flatten(text)}"
                 blocks[-1].language = detect_language(blocks[-1].text)
             else:
@@ -619,6 +626,8 @@ def _signals(text: str, raw: RawBlock, body_size: float) -> set[str] | None:
         return None
     if (not numbering and _starts_lowercase(flat)) or not has_real_words(flat):
         return None
+    if not numbering and not HEADING_WORD.search(flat):  # "B FAM": a chart's letters
+        return None
     if _is_formula(flat):
         return None
     uppercase = _uppercase(flat)
@@ -686,6 +695,10 @@ def _decide_headings(
         if not text or not _is_candidate(raw) or (index in quoted and not styled):
             headings.append(None)
             continue
+        if raw.heading_source == "subheading" and raw.heading_level is None:
+            # A reader's subheading (a bold DOCX paragraph): one level below what it follows.
+            headings.append(_Heading("style", ("below",), size))
+            continue
         if raw.heading_level is not None and raw.heading_source == "numbering":
             headings.append(_Heading("numbering", _kind(text, raw), size))
             continue
@@ -711,7 +724,32 @@ def _decide_headings(
     _drop_captions(headings, prepared, body_size)
     _drop_run_in_titles(headings, prepared)
     _drop_inside_tables(headings, prepared)
+    _repeat_heading_decisions(headings, prepared)
     return headings
+
+
+def _repeat_heading_decisions(
+    headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]]
+) -> None:
+    """A short line accepted as a heading makes every other line with the same text (trailing
+    punctuation aside) and the same look a heading too: a book's recurring "Review questions"
+    gets one decision, not one per page."""
+    accepted: dict[tuple[str, tuple[float, bool, bool]], _Heading] = {}
+    for heading, (raw, text) in zip(headings, prepared, strict=True):
+        if heading is not None and len(_flatten(text).split()) <= config.MAX_TITLE_WORDS:
+            accepted.setdefault((_bare_title(text), _style_of(raw, text)), heading)
+    if not accepted:
+        return
+    for index, (raw, text) in enumerate(prepared):
+        if headings[index] is not None or not text or not _is_candidate(raw):
+            continue
+        model = accepted.get((_bare_title(text), _style_of(raw, text)))
+        if model is not None and not numbering_info(_flatten(text)):
+            headings[index] = _Heading(model.source, model.kind, raw.font_size or 0.0)
+
+
+def _bare_title(text: str) -> str:
+    return _key(_flatten(text).rstrip(".:;!?… "))
 
 
 def _next_block(prepared: list[tuple[RawBlock, str]], index: int) -> tuple[RawBlock, str] | None:
@@ -806,26 +844,41 @@ def _title_key(text: str) -> str:
 def _drop_outline_entries(
     headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]]
 ) -> None:
-    """Numbered titles that the document repeats later as headings, standing here next to each
+    """Numbered titles that the document repeats later as headings, standing next to each
     other with no text between them, are outline entries (a chapter's plan or a contents
-    list): list items, not headings. A repeated title on its own ("1-§. General provisions"
-    in every chapter) stays a heading."""
-    numbers = [_section_number(_flatten(text)) if text else None for _, text in prepared]
-    later: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    list): list items, not headings. Every numbered line counts for the run, heading
+    candidate or not, so the plan's last item goes with the others. A repeated title on its
+    own ("1-§. General provisions" in every chapter) stays a heading."""
+    entries = [_numbered_lines(text) for _, text in prepared]
+    as_heading: dict[str, list[tuple[int, str]]] = defaultdict(list)
     for index, heading in enumerate(headings):
-        number = numbers[index]
-        if heading is not None and number:
-            later[number].append((index, _title_key(_flatten(prepared[index][1]))))
+        if heading is not None:
+            for number, key in entries[index][:1]:
+                as_heading[number].append((index, key))
 
-    repeated: set[int] = set()
-    for occurrences in later.values():
-        for (index, key), (_, later_key) in zip(occurrences, occurrences[1:], strict=False):
-            if key and later_key and _similar_titles(key, later_key):
-                repeated.add(index)
+    def repeated_later(index: int) -> bool:
+        return any(
+            later > index and key and later_key and _similar_titles(key, later_key)
+            for number, key in entries[index]
+            for later, later_key in as_heading.get(number, [])
+        )
+
+    repeated = {index for index in range(len(prepared)) if repeated_later(index)}
     for index in repeated:
-        if index - 1 in repeated or index + 1 in repeated:
+        several = sum(1 for number, _ in entries[index] if number) > 1
+        if several or index - 1 in repeated or index + 1 in repeated:
             headings[index] = None
             prepared[index][0].list_item = True
+
+
+def _numbered_lines(text: str) -> list[tuple[str, str]]:
+    """(section number, title key) of each numbered line of a block."""
+    found: list[tuple[str, str]] = []
+    for line in text.split("\n") if text else []:
+        flat = _flatten(line)
+        if number := _section_number(flat):
+            found.append((number, _title_key(flat)))
+    return found
 
 
 def _similar_titles(a: str, b: str) -> bool:
@@ -836,14 +889,17 @@ def _similar_titles(a: str, b: str) -> bool:
 def _drop_lead_in_labels(
     headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]]
 ) -> None:
-    """A short line ending with ":" that introduces numbered items is a label, not a
-    heading."""
+    """A short line ending with ":" that introduces numbered items, or that has no body text
+    after it before the next heading, is a label, not a heading."""
     for index, heading in enumerate(headings):
         text = _flatten(prepared[index][1])
         if heading is None or not text.endswith(":") or numbering_info(text):
             continue
-        following = next((_flatten(t) for _, t in prepared[index + 1 :] if t.strip()), "")
-        if numbering_info(following):
+        position = next(
+            (i for i in range(index + 1, len(prepared)) if prepared[i][1].strip()), None
+        )
+        following = _flatten(prepared[position][1]) if position is not None else ""
+        if numbering_info(following) or position is None or headings[position] is not None:
             headings[index] = None
 
 
@@ -902,7 +958,7 @@ def _keep_heading_sequences(
 
 def _assign_levels(headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]]) -> None:
     """Turn heading kinds into levels, so a child can never sit above its parent."""
-    present = [h for h in headings if h is not None and h.kind[0] != "fixed"]
+    present = [h for h in headings if h is not None and h.kind[0] not in ("fixed", "below")]
     numbered = sorted({h.kind for h in present if h.kind[0] in ("kw", "dec")}, key=_kind_order)
     fonts = sorted({h.kind for h in present if h.kind[0] == "font"}, key=_font_order)
     sizes = {k: statistics.median(h.size for h in present if h.kind == k) for k in numbered}
@@ -913,9 +969,16 @@ def _assign_levels(headings: list[_Heading | None], prepared: list[tuple[RawBloc
 
     levels: dict[tuple[object, ...], int] = {}
     current = 0
+    nests = _nesting_keywords(headings)
+    previous: tuple[object, ...] | None = None
     for kind in numbered:
-        current = fixed_levels[kind].most_common(1)[0][0] if fixed_levels[kind] else current + 1
+        rival = previous is not None and previous[0] == kind[0] == "kw" and kind not in nests
+        if fixed_levels[kind]:
+            current = fixed_levels[kind].most_common(1)[0][0]
+        elif not rival:  # a chapter word that never appears under the one above ranks with it
+            current += 1
         levels[kind] = current
+        previous = kind
     deepest = current
     for kind in fonts:
         if fixed_levels[kind]:
@@ -933,14 +996,42 @@ def _assign_levels(headings: list[_Heading | None], prepared: list[tuple[RawBloc
             levels[kind] = deepest
     styles = _numbered_styles(headings, prepared, levels)
     for heading, (raw, text) in zip(headings, prepared, strict=True):
-        if heading is None or heading.kind[0] == "fixed" or heading.level is not None:
+        if heading is None or heading.kind[0] in ("fixed", "below") or heading.level is not None:
             continue
         heading.level = levels[heading.kind]
         style = _style_of(raw, text)
         if heading.kind[0] == "font" and (match := styles.get(style)) is not None:
             heading.level = match
     _enforce_parents(headings, prepared)
+    _place_subheadings(headings)
     _close_level_gaps(headings)
+
+
+def _place_subheadings(headings: list[_Heading | None]) -> None:
+    """A reader's subheading sits one level below the last other heading before it."""
+    parent = 0
+    for heading in headings:
+        if heading is None:
+            continue
+        if heading.kind[0] == "below":
+            heading.level = parent + 1
+        elif heading.level is not None:
+            parent = heading.level
+
+
+def _nesting_keywords(headings: list[_Heading | None]) -> set[tuple[object, ...]]:
+    """Chapter-word kinds that appear after a higher-ranked one ("1-bob" after "I BOʻLIM"),
+    so they really sit inside it."""
+    seen: set[int] = set()
+    nested: set[tuple[object, ...]] = set()
+    for heading in headings:
+        if heading is None or heading.kind[0] != "kw":
+            continue
+        rank = int(heading.kind[1])  # type: ignore[call-overload]
+        if any(higher < rank for higher in seen):
+            nested.add(heading.kind)
+        seen.add(rank)
+    return nested
 
 
 def _style_of(raw: RawBlock, text: str) -> tuple[float, bool, bool]:
@@ -1023,14 +1114,8 @@ def _title_runs_on(title: str, title_raw: RawBlock, raw: RawBlock, text: str) ->
     flat = _flatten(text)
     if not flat or raw.rows is not None or raw.footnote or raw.role or raw.list_item:
         return False
-    words = title.split()
-    open_end = (
-        title[-1:] in ",-–("
-        or title.count("(") > title.count(")")
-        or (bool(words) and words[-1].lower() in config.JOINING_WORDS)
-    )
     capitals = _uppercase(title) and _uppercase(flat)
-    return _starts_lowercase(flat) or open_end or capitals
+    return _starts_lowercase(flat) or _open_title(title) or capitals
 
 
 def _same_style(a: RawBlock, b: RawBlock) -> bool:
@@ -1051,13 +1136,37 @@ def _continues_heading(heading: Block, heading_raw: RawBlock, raw: RawBlock, tex
         return False
     if flat.endswith(":"):  # a label introducing what follows ("Plan:"), not the title's end
         return False
-    if heading.text[-1] in ".?!" or not _same_style(heading_raw, raw):
+    # A title left open ("... va", "...,") must go on: its next line may differ a little in
+    # style (a regular word, another font size) and sit a little further down.
+    open_title = _open_title(heading.text)
+    if heading.text[-1] in ".?!":
+        return False
+    if not (_same_style(heading_raw, raw) or (open_title and _close_style(heading_raw, raw))):
         return False
     if heading_raw.bbox and raw.bbox:
         gap = raw.bbox[1] - heading_raw.bbox[3]
-        if gap > config.CONTINUATION_GAP * (raw.font_size or 12.0):
+        limit = config.CONTINUATION_GAP * (config.OPEN_TITLE_GAP_FACTOR if open_title else 1)
+        if gap > limit * (raw.font_size or 12.0):
             return False
     return True
+
+
+def _open_title(title: str) -> bool:
+    """The title cannot end here: a comma, a hyphen, an open bracket or a joining word."""
+    words = title.split()
+    return (
+        title[-1:] in ",-–("
+        or title.count("(") > title.count(")")
+        or (bool(words) and words[-1].lower() in config.JOINING_WORDS)
+    )
+
+
+def _close_style(a: RawBlock, b: RawBlock) -> bool:
+    """Nearly the same look: sizes within ``LARGER_FONT_RATIO`` of each other, either bold."""
+    if a.font_size is None or b.font_size is None:
+        return a.font_size == b.font_size
+    small, large = sorted((a.font_size, b.font_size))
+    return large <= small * config.LARGER_FONT_RATIO and max(a.bold, b.bold) >= config.BOLD_SHARE
 
 
 # --- Joining across pages, language of short blocks ----------------------------------------
