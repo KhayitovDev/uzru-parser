@@ -101,6 +101,8 @@ jobs:
         with:
           name: wheel-musllinux-x86_64
           path: dist
+      - name: Install the C++ runtime PyMuPDF's musl wheel needs
+        run: apk add --no-cache libstdc++
       - name: Bare install and full test suite
         run: |
           python -m venv /tmp/bare && /tmp/bare/bin/pip install dist/*.whl
@@ -136,6 +138,8 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          # Release candidates share the package version: keep files already uploaded.
+          skip-existing: true
 
   publish-pypi:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, 'rc')

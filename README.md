@@ -16,7 +16,8 @@ pip install "uzru-parser[pdf]"     # DOCX and PDF support
 PDF support uses [PyMuPDF](https://github.com/pymupdf/PyMuPDF), installed by the `pdf` extra.
 PyMuPDF is licensed under **AGPL-3.0** (or a commercial licence from Artifex): check that this
 fits your use before installing the extra. Without it, parsing a PDF raises an `ImportError`
-that explains how to install it.
+that explains how to install it. On Alpine Linux, PyMuPDF also needs the C++ runtime:
+`apk add libstdc++`.
 
 Wheels are published for Linux (x86_64, aarch64, musl), macOS (Intel and Apple Silicon) and
 Windows (x64), for CPython 3.10 and newer.
