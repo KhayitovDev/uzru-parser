@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+test-files/
+*.pdb
+*.pyd
+python/uzru_parser/*.so

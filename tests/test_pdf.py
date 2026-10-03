@@ -534,3 +534,38 @@ def test_title_page_gives_the_title_when_the_file_has_none(tmp_path: Path) -> No
     doc.save(path)
     doc.close()
     assert parse(path).metadata.title == "BANK ISHI ASOSLARI"
+
+
+def test_damaged_and_locked_files_give_clear_errors(tmp_path: Path) -> None:
+    from uzru_parser import DocumentError
+
+    empty = tmp_path / "empty.pdf"
+    empty.write_bytes(b"")
+    broken = tmp_path / "broken.pdf"
+    broken.write_bytes(b"%PDF-1.4 this is not a pdf")
+    locked = tmp_path / "locked.pdf"
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "maxfiy")
+    doc.save(locked, encryption=pymupdf.PDF_ENCRYPT_AES_256, owner_pw="o", user_pw="u")
+    doc.close()
+    with pytest.raises(DocumentError, match="empty"):
+        parse(empty)
+    with pytest.raises(DocumentError, match="not a valid PDF"):
+        parse(broken)
+    with pytest.raises(DocumentError, match="password-protected"):
+        parse(locked)
+    with pytest.raises(FileNotFoundError):
+        parse(tmp_path / "missing.pdf")
+
+
+def test_image_only_pdf_needs_ocr(tmp_path: Path) -> None:
+    path = tmp_path / "scan.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    picture = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 400, 600), False)
+    picture.clear_with(200)
+    page.insert_image(page.rect, pixmap=picture)
+    doc.save(path)
+    doc.close()
+    document = parse(path)
+    assert document.pages[0].needs_ocr and not document.blocks

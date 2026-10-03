@@ -3,22 +3,14 @@
 from pathlib import Path
 
 import pymupdf
-import pytest
 
-FONT_CANDIDATES = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-    "/Library/Fonts/Arial Unicode.ttf",
-    "C:/Windows/Fonts/arial.ttf",
-]
+FONTS = Path(__file__).parent / "fonts"
 
 
 def cyrillic_font() -> str:
-    """PyMuPDF's built-in fonts have no Cyrillic, so tests borrow a system font."""
-    for candidate in FONT_CANDIDATES:
-        if Path(candidate).exists():
-            return candidate
-    pytest.skip("no Cyrillic-capable system font found for generating test PDFs")
+    """PyMuPDF's built-in fonts have no Cyrillic; the tests bundle DejaVu Sans so generated
+    PDFs are the same on every platform."""
+    return str(FONTS / "DejaVuSans.ttf")
 
 
 def make_pdf(path: Path, pages: list[str]) -> Path:
@@ -34,7 +26,4 @@ def make_pdf(path: Path, pages: list[str]) -> Path:
 
 
 def bold_font() -> str:
-    path = cyrillic_font().replace("DejaVuSans.ttf", "DejaVuSans-Bold.ttf")
-    if not Path(path).exists():
-        pytest.skip("bold font not available")
-    return path
+    return str(FONTS / "DejaVuSans-Bold.ttf")

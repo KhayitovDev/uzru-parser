@@ -10,21 +10,43 @@ readme = "README.md"
 license = "MIT AND CC-BY-SA-4.0 AND Apache-2.0 AND BSD-3-Clause AND Unicode-3.0"
 license-files = ["LICENSE", "THIRD_PARTY.md", "LICENSES/*", "src/data/LICENSE"]
 requires-python = ">=3.10"
-dependencies = ["pymupdf>=1.24", "python-docx>=1.1"]
+authors = [{ name = "Khayitboy Khayitov" }]
+maintainers = [{ name = "Khayitboy Khayitov" }]
+dependencies = ["python-docx>=1.1"]
+keywords = ["parser", "rag", "chunking", "pdf", "docx", "russian", "uzbek", "nlp"]
 classifiers = [
-    "Programming Language :: Python :: 3",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Rust",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
     "Natural Language :: Russian",
     "Natural Language :: Uzbek",
 ]
 
+[project.urls]
+Homepage = "https://github.com/KhayitovDev/uzru-parser"
+Repository = "https://github.com/KhayitovDev/uzru-parser"
+Issues = "https://github.com/KhayitovDev/uzru-parser/issues"
+Changelog = "https://github.com/KhayitovDev/uzru-parser/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "maturin>=1.9.6,<2.0"]
+pdf = ["pymupdf>=1.24"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "maturin>=1.9.6,<2.0", "pymupdf>=1.24"]
 
 [tool.maturin]
 python-source = "python"
 module-name = "uzru_parser._core"
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "pyo3/abi3-py310"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

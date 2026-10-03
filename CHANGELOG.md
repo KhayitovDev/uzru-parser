@@ -1,6 +1,23 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-03)
+
+First public alpha release.
+
+**Features:** PDF and DOCX parsing for Russian and Uzbek (Latin and Cyrillic) into typed
+blocks (headings with levels, paragraphs, lists, tables, footnotes) with per-block language;
+structural chunking with heading paths, page ranges and overlap; a Rust core for
+normalization, hyphenation repair, language detection, numbering and sentence splitting.
+
+**Packaging:** PDF support is the optional `pdf` extra (`pip install "uzru-parser[pdf]"`)
+because PyMuPDF is AGPL-3.0; `import uzru_parser` and DOCX parsing work without it. One abi3
+wheel per platform covers CPython 3.10 and newer. Unreadable files raise `DocumentError`.
+
+**Limitations:** no OCR (scanned pages get `needs_ocr`); complex multi-column PDF layouts
+are not handled; DOCX page numbers are approximate; English is labelled `unknown`; formulas
+and charts become `formula` / `figure` blocks; PDF parsing in threads is serialised.
+
+### Changes in detail
 
 - Rust core: Unicode normalization (Uzbek apostrophes), PDF hyphenation repair, language/script detection.
 - Python: `Document` model, PyMuPDF-based PDF parser, `Parser` / `parse` API.

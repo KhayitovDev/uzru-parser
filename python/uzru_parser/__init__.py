@@ -10,7 +10,7 @@ from .models import (
     LanguageInfo,
     Page,
 )
-from .parser import Parser, parse
+from .parser import DocumentError, Parser, parse
 
 __all__ = [
     "Block",
@@ -18,6 +18,7 @@ __all__ = [
     "Chunker",
     "BlockType",
     "Document",
+    "DocumentError",
     "DocumentMetadata",
     "LanguageInfo",
     "Page",

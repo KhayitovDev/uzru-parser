@@ -237,3 +237,18 @@ def test_bullet_list_stays_bulleted(tmp_path: Path) -> None:
         b for b in parse(save(document, tmp_path / "b.docx")).blocks if b.type is BlockType.LIST
     ]
     assert lists[0].extra["items"] == ["• maʼlumot", "• xizmatlar"]
+
+
+def test_corrupt_or_empty_docx_gives_a_clear_error(tmp_path: Path) -> None:
+    from uzru_parser import DocumentError
+
+    corrupt = tmp_path / "corrupt.docx"
+    corrupt.write_bytes(b"PK\x03\x04 not really a zip")
+    empty = tmp_path / "empty.docx"
+    empty.write_bytes(b"")
+    with pytest.raises(DocumentError, match="not a valid DOCX"):
+        parse(corrupt)
+    with pytest.raises(DocumentError, match="empty"):
+        parse(empty)
+    with pytest.raises(DocumentError, match="Unsupported"):
+        parse(tmp_path / "notes.txt")
