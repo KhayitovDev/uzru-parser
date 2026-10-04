@@ -79,11 +79,22 @@ def test_bold_paragraphs_are_not_a_heading_style() -> None:
     assert profile.headings == {}
 
 
-def test_a_single_bigger_title_is_a_heading_style_but_a_single_bold_line_is_not() -> None:
-    blocks = [raw("Kirish", 1, 60, size=14, bold=1.0), raw(BODY, 1, 90)]
-    blocks += [raw("Muhim eslatma", 2, 60, bold=1.0), raw(BODY, 2, 90), raw(BODY, 3, 90)]
+def test_bigger_titles_make_a_heading_style_but_a_single_bold_line_does_not() -> None:
+    titles = ["Kirish", "Asosiy qism", "Xulosa"]
+    blocks = [
+        b
+        for p, t in enumerate(titles, 1)
+        for b in (raw(t, p, 60, size=14, bold=1.0), raw(BODY, p, 90))
+    ]
+    blocks += [raw("Muhim eslatma", 4, 60, bold=1.0), raw(BODY, 4, 90), raw(BODY, 5, 90)]
     profile = build_profile(blocks, HEIGHTS)
     assert list(profile.headings) == [Style("times", 14.0, True, False, False)]
+
+
+def test_a_lone_title_makes_no_profile() -> None:
+    """One big title says nothing about the other headings: the rules without a profile apply."""
+    blocks = [raw("Kirish", 1, 60, size=14, bold=1.0), raw(BODY, 1, 90), raw(BODY, 2, 90)]
+    assert build_profile(blocks, HEIGHTS).headings == {}
 
 
 def test_small_text_at_the_foot_of_pages_is_the_footnote_style() -> None:

@@ -1156,3 +1156,24 @@ def test_chapter_words_that_nest_keep_their_order() -> None:
         body(UZ_BODY),
     ]
     assert [level for _, level in levels_of(raws)] == [1, 2, 2]
+
+
+def test_sentence_left_open_at_a_page_end_goes_on_before_a_capital() -> None:
+    """A paragraph ending a page with a word goes on onto the next page even when that page
+    starts with a capital ("... tenglashtirilgan, Oʻzbekiston" + "Respublikasi ...")."""
+    first = RawBlock(
+        text="Diplomatik vakolatxonalarga hamda ularga tenglashtirilgan, Oʻzbekiston",
+        page=1,
+        font_size=11.0,
+        bbox=(72, 760, 520, 774),
+    )
+    rest = RawBlock(
+        text="Respublikasi hududida joylashgan xalqaro tashkilotlarga beriladi.",
+        page=2,
+        font_size=11.0,
+        bbox=(72, 80, 520, 94),
+    )
+    blocks = build_blocks([first, rest])
+    assert len(blocks) == 1 and blocks[0].text.endswith("tashkilotlarga beriladi.")
+    finished = RawBlock(text=first.text + ".", page=1, font_size=11.0, bbox=first.bbox)
+    assert len(build_blocks([finished, rest])) == 2

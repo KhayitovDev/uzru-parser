@@ -226,13 +226,26 @@ XY_BAND_GAP = 1.5
 #: A style at least this share of the body size counts as body size (bold, italic or capitals
 #: then make it prominent); smaller styles are never heading styles.
 PROFILE_SAME_SIZE = 0.95
-#: A heading style holds at most this share of the document's characters...
-PROFILE_HEADING_MAX_SHARE = 0.1
-#: ...is used for short blocks (MAX_HEADING_LINES lines) at least this share of the time...
+#: A heading style holds at most this share of the document's characters (codes and
+#: textbooks with a title on every article hold about 10%; body styles fail the short test)...
+PROFILE_HEADING_MAX_SHARE = 0.2
+#: ...is used for short headings (up to MAX_KEYWORD_HEADING_CHARS characters on at most
+#: PROFILE_HEADING_MAX_LINES lines: titles wrap more in narrow columns) at least this share
+#: of the time...
 PROFILE_HEADING_SHORT_SHARE = 0.8
-#: ...and is followed by body text at least this share of the time (chart labels and other
-#: short styled fragments follow each other instead).
+PROFILE_HEADING_MAX_LINES = 6
+#: ...and is followed by body text, or by a heading of another style, at least this share of
+#: the time (chart labels and other short styled fragments follow their own style instead).
 PROFILE_HEADING_BEFORE_BODY = 0.5
+#: Heading styles used fewer times than this in all (a lone document title) are ignored, so
+#: the heading rules without a style profile apply.
+PROFILE_MIN_HEADINGS = 3
+#: A title split into several blocks has at least this many words on its first line
+#: (stacked single words are chart or diagram labels).
+MIN_WRAPPED_TITLE_WORDS = 2
+#: A paragraph at least this long that ends a page with a word or a comma goes on onto the
+#: next page even when that page starts with a capital (a name: "Oʻzbekiston Respublikasi").
+MIN_UNFINISHED_CHARS = 60
 #: A style only emphasised (bold, italic, capitals at body size) needs this many blocks to be
 #: a heading style; a bigger style can be one with a single use (a short document's title).
 PROFILE_MIN_EMPHASIS_BLOCKS = 2
@@ -262,6 +275,9 @@ TAGGED_MCID_SAMPLE = 20
 TAGGED_MAX_PAGE_MCIDS = 3000
 #: Deepest parent-tree level followed (a sane tree has two or three).
 TAGGED_MAX_TREE_DEPTH = 16
+#: A text block in the margin band caught inside a tagged element is page furniture when a
+#: gap of this many of its line heights separates it from the element's other lines.
+TAGGED_MARGIN_GAP = 1.5
 
 # --- Page confidence (PDF) --------------------------------------------------------------------
 
@@ -352,8 +368,12 @@ MIN_MULTI_CELL_ROWS = 0.3
 RUNNING_TEXT_ROWS = 0.5
 #: Rows at the top that can be one header split over several lines.
 HEADER_ROWS = 3
-#: Only pages with this many vector paths are searched for tables (find_tables is slow).
-MIN_RULING_PATHS = 4
+#: Only pages with this many horizontal and this many vertical table rules are searched for
+#: ruled tables (find_tables is slow): stroked paths, or filled bars at most RULE_THICKNESS
+#: points thick. Wider filled boxes are backgrounds (browsers draw one behind each
+#: highlighted line) and would frame fake cells.
+MIN_RULING_PATHS = 2
+RULE_THICKNESS = 2.0
 #: Tolerance, as a share of the table's height, when matching its ruling lines to its edges.
 TABLE_RULE_SLACK = 0.01
 #: Tables without ruling lines are looked for where at least this many consecutive rows split

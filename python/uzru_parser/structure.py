@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 from . import config
 from .models import Block, BlockType, LanguageInfo
-from .profile import StyleProfile, style_of
+from .profile import SIZE_STEP, StyleProfile, style_of
 from .text import (
     CleanStats,
     Hyphenator,
@@ -679,7 +679,9 @@ def _signals(text: str, raw: RawBlock, body_size: float, styled: bool = False) -
     numbering = numbering_info(flat)
     keyword = numbering is not None and numbering[0] == "keyword"
     limit = config.MAX_KEYWORD_HEADING_CHARS if keyword else config.MAX_HEADING_CHARS
-    if len(flat) > limit or text.count("\n") + 1 > config.MAX_HEADING_LINES:
+    # A numbered title ("12-modda. ...") wraps over more lines in a narrow column.
+    lines = config.PROFILE_HEADING_MAX_LINES if keyword else config.MAX_HEADING_LINES
+    if len(flat) > limit or text.count("\n") + 1 > lines:
         return None
     if numbering and numbering[0] == "bullet":
         return None
@@ -745,6 +747,21 @@ def _item_number(text: str) -> int | None:
     return None
 
 
+def _same_title(raw: RawBlock, following: RawBlock) -> bool:
+    """``following`` continues the title in ``raw``: the next line on the page, no space
+    between them, the same size and weight. A title that wraps has a few words on its first
+    line; stacked single words are labels (of a chart, a diagram)."""
+    return (
+        len(_flatten(raw.text).split()) >= config.MIN_WRAPPED_TITLE_WORDS
+        and following.page == raw.page
+        and not following.spaced
+        and following.rows is None
+        and abs((following.font_size or 0.0) - (raw.font_size or 0.0)) < SIZE_STEP
+        and (following.bold >= config.BOLD_SHARE) == (raw.bold >= config.BOLD_SHARE)
+        and len(_flatten(following.text)) <= config.MAX_HEADING_CHARS
+    )
+
+
 def _set_apart(index: int, prepared: list[tuple[RawBlock, str]], profile: StyleProfile) -> bool:
     """The block stands apart from the text around it: space above it (or the top of its
     page) and, below it, space, the start of the body text, a list or a table."""
@@ -752,7 +769,11 @@ def _set_apart(index: int, prepared: list[tuple[RawBlock, str]], profile: StyleP
     previous = next(
         (r for r, t in reversed(prepared[:index]) if t.strip() and not r.footnote), None
     )
-    following = next((r for r, t in prepared[index + 1 :] if t.strip() and not r.footnote), None)
+    rest = [r for r, t in prepared[index + 1 :] if t.strip() and not r.footnote]
+    # A title wrapped into several blocks: what follows is what comes after its last line.
+    while rest and style_of(raw) != profile.body and _same_title(raw, rest[0]):
+        rest = rest[1:]
+    following = rest[0] if rest else None
     above = raw.spaced or previous is None or previous.page != raw.page
     if following is None:
         return above
@@ -809,6 +830,13 @@ def _decide_headings(
                 or _set_apart(index, prepared, profile)
             )
             accepted = accepted or (raw.layout_title and styled_look)
+            # Outside the heading styles (bold also used in the text, an annex label in the
+            # body font) a line still needs the signals the rules without a profile ask for,
+            # plus a heading word with its number ("1-ILOVA") or space around it.
+            accepted = accepted or (
+                len(signals) >= config.MIN_HEADING_SIGNALS
+                and ("keyword" in signals or _set_apart(index, prepared, profile))
+            )
         else:
             accepted = len(signals) >= config.MIN_HEADING_SIGNALS or (
                 raw.layout_title and bool(signals)
@@ -1249,7 +1277,26 @@ def _title_runs_on(title: str, title_raw: RawBlock, raw: RawBlock, text: str) ->
     if not flat or raw.rows is not None or raw.footnote or raw.role or raw.list_item:
         return False
     capitals = _uppercase(title) and _uppercase(flat)
-    return _starts_lowercase(flat) or _open_title(title) or capitals
+    return (
+        _starts_lowercase(flat)
+        or _open_title(title)
+        or capitals
+        or _wrapped(title_raw, raw, title, flat)
+    )
+
+
+def _wrapped(title_raw: RawBlock, raw: RawBlock, title: str, flat: str) -> bool:
+    """The title's line ended because the next word did not fit: the line and that word are
+    wider than the lines below, so the break is a wrap, not the title's end. A sentence
+    (ending with a full stop) below a title is body text, not its second half."""
+    if not title_raw.bbox or not raw.bbox or not title or "\n" in title_raw.text:
+        return False
+    if flat.endswith((".", "!", "?")):
+        return False
+    width = title_raw.bbox[2] - title_raw.bbox[0]
+    next_word = flat.split()[0]
+    char_width = width / len(title)
+    return width + char_width * (len(next_word) + 1) > raw.bbox[2] - raw.bbox[0]
 
 
 def _same_style(a: RawBlock, b: RawBlock) -> bool:
@@ -1387,8 +1434,20 @@ def _is_continuation(previous: Block, block: Block, page_layout: bool) -> bool:
     last = previous.text[-1]
     # A page break may fall anywhere; a paragraph break only inside an unfinished sentence.
     open_sentence = (last.isalpha() or last in ",-") if same_flow else last not in SENTENCE_END
+    # Across a page break a sentence left visibly unfinished (ending with a word or a comma)
+    # goes on even with a capital: "... tenglashtirilgan, Oʻzbekiston" + "Respublikasi ...".
+    unfinished = (
+        page_layout
+        and not same_flow
+        and (last.isalpha() or last == ",")
+        and len(previous.text) >= config.MIN_UNFINISHED_CHARS
+        and block.type is BlockType.PARAGRAPH
+    )
     return (
-        tail or (open_sentence and block.text[0].islower()) or ends_with_abbreviation(previous.text)
+        tail
+        or (open_sentence and block.text[0].islower())
+        or unfinished
+        or ends_with_abbreviation(previous.text)
     )
 
 

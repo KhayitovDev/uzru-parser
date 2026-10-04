@@ -306,7 +306,7 @@ def page_units(lines: Sequence[TaggedLine], page_height: float) -> tuple[list[Un
     """Group a page's tagged lines into units, in structure order, and return the lines left
     outside the tree. MuPDF keeps an element open until the next one starts, so a page footer
     drawn after the last paragraph lands inside it: a text block in the top or bottom margin
-    band of a unit that otherwise lies outside the band is page furniture, not the unit."""
+    band, set apart from the rest of the unit, is page furniture, not the unit."""
     units: dict[Key, Unit] = {}
     loose: list[Line] = []
     for tagged in lines:
@@ -339,19 +339,28 @@ def _in_band(bbox: tuple[float, float, float, float], page_height: float) -> boo
 
 
 def _split_margin(unit: Unit, page_height: float) -> tuple[list[TaggedLine], list[Line]]:
-    """The unit's lines, without text blocks in the margin band when the unit's first block
-    lies outside it."""
-    first = unit.lines[0].line.block
-    first_lines = [t.line for t in unit.lines if t.line.block == first]
-    if any(_in_band(line.bbox, page_height) for line in first_lines):
-        return unit.lines, []
-    inside: list[TaggedLine] = []
-    margin: list[Line] = []
+    """The unit's lines, without the text blocks in the margin band that stand apart from
+    the rest of the unit (a running header or page number caught inside it)."""
+    blocks: dict[int, list[TaggedLine]] = {}
     for tagged in unit.lines:
-        if tagged.line.block != first and _in_band(tagged.line.bbox, page_height):
-            margin.append(tagged.line)
-        else:
-            inside.append(tagged)
+        blocks.setdefault(tagged.line.block, []).append(tagged)
+    furniture: set[int] = set()
+    for number, members in blocks.items():
+        if not all(_in_band(t.line.bbox, page_height) for t in members):
+            continue
+        others = [t.line.bbox for t in unit.lines if t.line.block != number]
+        if not others:
+            continue  # the whole unit is in the margin: keep it
+        top = min(t.line.bbox[1] for t in members)
+        bottom = max(t.line.bbox[3] for t in members)
+        height = max(t.line.bbox[3] - t.line.bbox[1] for t in members)
+        gap = min(max(box[1] - bottom, top - box[3]) for box in others)
+        if gap >= config.TAGGED_MARGIN_GAP * height:
+            furniture.add(number)
+    if not furniture:
+        return unit.lines, []
+    inside = [t for t in unit.lines if t.line.block not in furniture]
+    margin = [t.line for t in unit.lines if t.line.block in furniture]
     return inside, margin
 
 

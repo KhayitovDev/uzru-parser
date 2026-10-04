@@ -562,3 +562,28 @@ def test_short_line_after_a_finished_sentence_can_still_be_a_label() -> None:
         line("Fransiya", 200, x0=250, x1=310),
     ]
     assert 1 in figure_labels(lines, [region], SIZE, 500.0)
+
+
+def test_short_lines_ending_with_a_semicolon_are_separate_items() -> None:
+    lead = [
+        line("Markaziy bankning asosiy maqsadi quyidagilarning barqarorligini taʼminlash", 72),
+        line("va mamlakat iqtisodiyotini rivojlantirish hamda moliya tizimini mustahkamlash:", 86),
+    ]
+    items = [
+        line("narxlarning;", 100, x0=92, x1=160),
+        line("bank tizimining;", 100 + PITCH, x0=92, x1=180),
+        line("toʻlov tizimlari barqarorligini taʼminlashdan iboratdir.", 100 + 2 * PITCH, x0=92),
+    ]
+    assert texts(lead + items)[-3:] == [item.text for item in items]
+
+
+def test_ragged_line_broken_before_a_long_capitalised_word_runs_on() -> None:
+    """The next word did not fit at the end of the line, so the line is not a paragraph end
+    even though the next line starts with a capital."""
+    lines = [
+        line("faoliyatini amalga oshirishni nazorat qiladi va Oʻzbekiston", 100, x1=470),
+        line("Respublikasining qonunlariga muvofiq ish yuritadi.", 100 + PITCH, x1=380),
+    ]
+    assert len(texts(lines)) == 1
+    room = [line("Bu qator ancha qisqa va Oʻzbekiston", 100, x1=260), lines[1]]
+    assert len(texts(room)) == 2  # the next word would have fitted: a real break
