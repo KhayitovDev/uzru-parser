@@ -7,8 +7,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .config import LEAD_IN_TOKENS, MIN_CHUNK_TOKENS
-from .models import Block, BlockType, Document
-from .text import detect_language, estimate_tokens, split_sentences
+from .models import Block, BlockType, Document, LanguageInfo
+from .text import detect_language, estimate_tokens, names_appendix, split_sentences
 
 PARAGRAPH_JOINER = "\n\n"
 DEFAULT_SKIP_ROLES = ("toc", "back_matter", "title_page")
@@ -43,6 +43,11 @@ class _Unit:
     page_end: int = 0
     path: tuple[str, ...] = ()
     figure: bool = False  # figure label or formula text: never a chunk of its own
+    table: int | None = None  # index of the table block the unit comes from
+    rows: list[list[str]] = field(default_factory=list)  # the table rows the unit holds
+    header: list[list[str]] = field(default_factory=list)  # its table's header rows
+    is_header: bool = False  # the unit holds the table's header rows
+    role: str | None = None  # the block's role ("formula", "image", ...)
 
 
 class Chunker:
@@ -76,7 +81,7 @@ class Chunker:
 
     def chunk(self, document: Document) -> list[Chunk]:
         run = _Run(self, document)
-        for block in document.blocks:
+        for index, block in enumerate(document.blocks):
             if not block.text.strip() or block.extra.get("role") in self.skip_roles:
                 continue
             if block.type is BlockType.FOOTNOTE:
@@ -84,17 +89,79 @@ class Chunker:
             elif block.type is BlockType.HEADING:
                 run.add_heading(block, self._count(block.text))
             else:
-                for unit in self._units(block):
+                for unit in self._units(block, index):
                     run.add_body(unit)
         run.finish()
         return run.chunks
 
-    def _units(self, block: Block) -> list[_Unit]:
+    def _units(self, block: Block, index: int = -1) -> list[_Unit]:
+        if block.type is BlockType.TABLE and block.extra.get("rows"):
+            return self._table_units(block, index)
         tokens = self._count(block.text)
         page_end = block.extra.get("page_end", block.page)
-        figure = block.extra.get("role") in ("figure", "formula")
+        figure = block.extra.get("role") in FIGURE_ROLES
         unit = _Unit(block.text, tokens, block.page, block.type, page_end=page_end, figure=figure)
+        unit.role = block.extra.get("role")
         return [unit] if tokens <= self.max_tokens else self.split_unit(unit)
+
+    def _table_units(self, block: Block, index: int) -> list[_Unit]:
+        """A table that fits is one unit. A larger one is cut between rows only: its header
+        rows form the first unit and every row its own, so no chunk ends inside a row and a
+        chunk that goes on with the table can repeat the header."""
+        rows = [row for row in block.extra["rows"] if any(cell.strip() for cell in row)]
+        header = rows[: header_row_count(rows, block.extra.get("spans", []))]
+        page_end = block.extra.get("page_end", block.page)
+        text = "\n".join(row_text(row) for row in rows)
+        tokens = self._count(text)
+        if tokens <= self.max_tokens:
+            return [
+                _Unit(
+                    text,
+                    tokens,
+                    block.page,
+                    BlockType.TABLE,
+                    page_end=page_end,
+                    table=index,
+                    rows=rows,
+                    header=header,
+                )
+            ]
+        units: list[_Unit] = []
+        if header:
+            head = "\n".join(row_text(row) for row in header)
+            units.append(
+                _Unit(
+                    head,
+                    self._count(head),
+                    block.page,
+                    BlockType.TABLE,
+                    "\n",
+                    page_end,
+                    table=index,
+                    rows=header,
+                    header=header,
+                    is_header=True,
+                )
+            )
+        for row in rows[len(header) :]:
+            line = row_text(row)
+            parts = self._fit(line, " ")
+            for number, part in enumerate(parts):
+                units.append(
+                    _Unit(
+                        part,
+                        self._count(part),
+                        block.page,
+                        BlockType.TABLE,
+                        "\n",
+                        page_end,
+                        table=index,
+                        rows=[row] if number == 0 else [],
+                        header=header,
+                    )
+                )
+        units[0].joiner = PARAGRAPH_JOINER
+        return units
 
     def split_unit(self, unit: _Unit) -> list[_Unit]:
         """Break a unit into sentences (or lines), and oversized pieces into word groups."""
@@ -136,6 +203,72 @@ class Chunker:
         return [" ".join(group) for group in groups]
 
 
+FIGURE_ROLES = ("figure", "formula", "image")
+#: A chunk with no language of its own inherits one of these from its document.
+INHERITABLE_LANGUAGES = ("uz", "ru")
+
+
+CONTENT_TYPES = {
+    BlockType.PARAGRAPH: "prose",
+    BlockType.QUOTE: "prose",
+    BlockType.LIST: "list",
+    BlockType.TABLE: "table",
+    BlockType.CODE: "code",
+}
+#: A chunk's content type is the one holding at least this share of its tokens, else "mixed".
+MAIN_CONTENT_SHARE = 0.7
+#: A header cell has at most this many words; a longer cell is data.
+HEADER_CELL_WORDS = 12
+
+
+def row_text(row: list[str]) -> str:
+    """A table row as one line: its non-empty cells joined by " | "."""
+    return " | ".join(" ".join(cell.split()) for cell in row if cell.strip())
+
+
+def header_row_count(rows: list[list[str]], spans: list[dict[str, int]]) -> int:
+    """How many top rows head the table. A header row holds short labels, not sentences or
+    a numbered item; a single caption cell above it ("(mlrd soʻm)") belongs to it, and so does
+    a second row under cells merged across columns (a two-level header: a recorded span, a
+    label repeated across, or a label merged down into the next row)."""
+    start = 0
+    width = max((len(row) for row in rows), default=0)
+    first = _filled(rows[0]) if rows else []
+    if len(first) == 1 and width >= 3:
+        if not any(char.isalpha() for char in first[0]):
+            return 0  # a stray mark, such as the quote opening an amended text
+        if len(rows) > 1 and first[0] in (cell.strip() for cell in rows[1]):
+            return 0  # a label merged down the first column: the rows are data
+        start = 1
+    if start + 1 >= len(rows) or not _header_like(_filled(rows[start])):
+        return 0
+    top, below = rows[start], rows[start + 1]
+    spanned = any(span["row"] == start and span["cols"] > 1 for span in spans)
+    repeated_across = any(a.strip() and a == b for a, b in zip(top, top[1:], strict=False))
+    merged_down = any(a.strip() and a == b for a, b in zip(top, below, strict=False))
+    two_level = (spanned or repeated_across) and merged_down or spanned
+    if two_level and start + 2 < len(rows) and _header_like(_filled(below)):
+        return start + 2
+    return start + 1
+
+
+def _filled(row: list[str]) -> list[str]:
+    return [cell.strip() for cell in row if cell.strip()]
+
+
+def _header_like(cells: list[str]) -> bool:
+    """Column labels: not all numbers, not a numbered item, no cell a long sentence."""
+    if not cells or all(_is_number(cell) for cell in cells):
+        return False
+    if _is_number(cells[0].rstrip(".)")) or not any(char.isalpha() for c in cells for char in c):
+        return False
+    return all(len(cell.split()) <= HEADER_CELL_WORDS and cell[-1] not in ".;" for cell in cells)
+
+
+def _is_number(text: str) -> bool:
+    return text.replace(",", "").replace(".", "").replace(" ", "").isdigit()
+
+
 def _common_prefix(paths: list[tuple[str, ...]]) -> tuple[str, ...]:
     prefix = paths[0]
     for path in paths[1:]:
@@ -153,6 +286,7 @@ class _Run:
         self.chunker = chunker
         self.document = document
         self.chunks: list[Chunk] = []
+        self.table_ids: list[set[int]] = []
         self.headings: list[tuple[int, str]] = []
         self.units: list[_Unit] = []
         self.carry: list[_Unit] = []
@@ -161,7 +295,11 @@ class _Run:
     def add_heading(self, block: Block, tokens: int) -> None:
         level = block.level or 1
         body = self._body_tokens()
-        if body and (level <= 2 or body >= MIN_CHUNK_TOKENS):
+        # A short text under a heading ("1-ILOVA" / "... Farmoniga") introduces its first
+        # subsection: it stays with it, under the subsection's path, instead of making a
+        # chunk of its own.
+        intro = bool(self.headings) and level > self.headings[-1][0] and body < MIN_CHUNK_TOKENS
+        if body and (level <= 2 or body >= MIN_CHUNK_TOKENS) and not intro:
             self.flush()
         while self.headings and self.headings[-1][0] >= level:
             self.headings.pop()
@@ -169,6 +307,9 @@ class _Run:
         self.carry = []
         unit = _Unit(block.text, tokens, block.page, BlockType.HEADING, page_end=block.page)
         unit.path = self._path()
+        if intro:
+            for pending in self.units:
+                pending.path = unit.path
         self.units.append(unit)
 
     def add_body(self, unit: _Unit) -> None:
@@ -178,10 +319,31 @@ class _Run:
             self.units = self.units[: len(self.units) - len(lead)]
             self.flush(carry_overlap=True)
             self.units = lead
+            if unit.table is not None and unit.header and not unit.is_header:
+                # The table goes on in this chunk: its header comes first, no old rows.
+                self.carry = []
+                self.units.append(self._repeated_header(unit))
         if self.carry and self._tokens() + unit.tokens > max_tokens:
             self.carry = []
         unit.path = self._path()
         self.units.append(unit)
+
+    def _repeated_header(self, unit: _Unit) -> _Unit:
+        text = "\n".join(row_text(row) for row in unit.header)
+        unit.joiner = "\n"
+        return _Unit(
+            text,
+            self.chunker._count(text),
+            unit.page,
+            BlockType.TABLE,
+            PARAGRAPH_JOINER,
+            unit.page,
+            self._path(),
+            table=unit.table,
+            rows=unit.header,
+            header=unit.header,
+            is_header=True,
+        )
 
     def _lead_in(self) -> list[_Unit]:
         """Trailing units that introduce what comes next (a short title line, "... the
@@ -217,7 +379,7 @@ class _Run:
             return
         parts = [*self.carry, *self.units]
         text = parts[0].text + "".join(p.joiner + p.text for p in parts[1:])
-        language = detect_language(text)
+        language, inherited = self._language(text)
         index = len(self.chunks)
         self.chunks.append(
             Chunk(
@@ -231,12 +393,74 @@ class _Run:
                 heading_path=list(path),
                 chunk_index=index,
                 token_count=sum(u.tokens for u in parts),
-                metadata={"footnotes": self.footnotes} if self.footnotes else {},
+                metadata=self._metadata(parts, path, inherited),
             )
         )
+        self.table_ids.append({u.table for u in parts if u.table is not None})
         self.footnotes = []
         self.carry = self._tail() if carry_overlap else []
         self.units = []
+
+    def _language(self, text: str) -> tuple[LanguageInfo, bool]:
+        """The chunk's own language; when its text alone tells none (a table of chemical
+        names, numbers) but is written in the document's script, the document's language."""
+        language = detect_language(text)
+        document = self.document.language
+        if (
+            language.language == "unknown"
+            and document.language in INHERITABLE_LANGUAGES
+            and language.script in (document.script, "none")
+        ):
+            return LanguageInfo(document.language, document.script, document.confidence), True
+        return language, False
+
+    def _metadata(
+        self, parts: list[_Unit], path: tuple[str, ...] = (), inherited: bool = False
+    ) -> dict[str, Any]:
+        """What the chunk holds, for filtering and citations: its content types, the table
+        rows it carries (structured, with their header), whether it lies in an appendix, the
+        document's title, where its language came from, its footnotes."""
+        metadata: dict[str, Any] = {}
+        body = [u for u in parts if u.kind is not BlockType.HEADING]
+        tokens: dict[str, int] = {}
+        for unit in body:
+            if unit.role in FIGURE_ROLES:
+                kind = str(unit.role)
+            else:
+                kind = CONTENT_TYPES.get(unit.kind, "prose")
+            tokens[kind] = tokens.get(kind, 0) + unit.tokens
+        if tokens:
+            main = max(tokens, key=lambda kind: tokens[kind])
+            share = tokens[main] / sum(tokens.values())
+            metadata["content_type"] = main if share >= MAIN_CONTENT_SHARE else "mixed"
+            metadata["content_types"] = sorted(tokens)
+        tables: dict[int, dict[str, Any]] = {}
+        for unit in body:
+            if unit.table is None:
+                continue
+            entry = tables.setdefault(
+                unit.table,
+                {"header": unit.header, "rows": [], "page": unit.page, "continued": False},
+            )
+            if unit.is_header:
+                # A header that is not the table's own first unit was repeated: the table
+                # began in an earlier chunk.
+                entry["continued"] = entry["continued"] or self._table_seen(unit.table)
+            else:
+                entry["rows"].extend(unit.rows)
+        if tables:
+            metadata["tables"] = list(tables.values())
+        if any(names_appendix(title) for title in path):
+            metadata["is_appendix"] = True
+        if self.document.metadata.title:
+            metadata["source_title"] = self.document.metadata.title
+        metadata["language_source"] = "document" if inherited else "chunk"
+        if self.footnotes:
+            metadata["footnotes"] = self.footnotes
+        return metadata
+
+    def _table_seen(self, table: int | None) -> bool:
+        return any(table in chunk_tables for chunk_tables in self.table_ids)
 
     def finish(self) -> None:
         """Flush what is left; a trailing heading without text joins the previous chunk."""
@@ -279,6 +503,8 @@ class _Run:
         budget = self.chunker.overlap
         tail: list[_Unit] = []
         body = [u for u in self.units if u.kind is not BlockType.HEADING and not u.figure]
+        if body and body[-1].table is not None:
+            return []  # table rows are never repeated; a continued table repeats its header
         start = len(body)
         for unit in reversed(body):
             if unit.tokens <= budget:
@@ -289,6 +515,8 @@ class _Run:
             if not tail:
                 tail = self._fitting_tail(unit, budget)
             break
+        while tail and tail[0].table is not None:
+            tail.pop(0)
         return self._complete_list_start(tail, body, start, budget)
 
     @staticmethod

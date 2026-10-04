@@ -319,3 +319,23 @@ def test_decorated_and_roman_page_numbers_are_furniture(text: str) -> None:
 def test_words_and_section_numbers_in_the_margin_stay(text: str) -> None:
     kept, removed = strip_page_furniture([styled(text, 3, 780)], BOOK)
     assert removed == 0
+
+
+def test_running_titles_on_every_other_page_are_furniture() -> None:
+    # A book: the chapter on the left pages, the section on the right ones.
+    left = [styled(f"{page} Chapter 1 Pythonic Thinking", page, 20) for page in (4, 6, 8)]
+    right = [styled(f"Item 3: Know the Differences {page}", page, 20) for page in (5, 7, 9)]
+    text = styled("Running text of the item.", 5, 300, 11)
+    long_book = {page: 800.0 for page in range(1, 41)}  # too few pages for the parity rule
+    kept, removed = strip_page_furniture([*left, *right, text], long_book)
+    assert kept == [text] and removed == 6
+
+
+def test_a_short_sections_running_title_is_found_by_its_place() -> None:
+    # Running titles at the head of pages 4-8; a short section shows its own only once.
+    running = [styled(f"{page} Chapter 2 Lists", page, 20) for page in (4, 6, 8)]
+    once = styled("Item 9: Avoid else Blocks 13", 9, 20)
+    elsewhere = styled("Item 9 in the text", 9, 300)
+    footer = styled("1 A footnote at the foot of the page", 9, 780)
+    kept, _ = strip_page_furniture([*running, once, elsewhere, footer], BOOK)
+    assert kept == [elsewhere, footer]

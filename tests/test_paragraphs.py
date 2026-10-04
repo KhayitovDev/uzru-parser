@@ -8,6 +8,7 @@ from uzru_parser.paragraphs import (
     join_spread_lines,
     layout_stats,
     merge_row_fragments,
+    rejoin_spread_rows,
 )
 from uzru_parser.structure import RawBlock
 
@@ -587,3 +588,75 @@ def test_ragged_line_broken_before_a_long_capitalised_word_runs_on() -> None:
     assert len(texts(lines)) == 1
     room = [line("Bu qator ancha qisqa va Oʻzbekiston", 100, x1=260), lines[1]]
     assert len(texts(room)) == 2  # the next word would have fitted: a real break
+
+
+def test_stretched_first_line_of_an_item_stays_in_place_next_to_a_margin_stamp() -> None:
+    """The item number and the stretched words of an item's first line come as separate
+    lines; a small stamp sits left of the text. The row is rebuilt before the reading order
+    is found, so the item reads in order and keeps its number."""
+    stamp = line("QMMB: 10/26/3886", 30, x0=20, x1=120, size=7.0)
+    first = spread_row(
+        [
+            ("10.", 108, 122),
+            ("Aholi", 140, 170),
+            ("punktlari", 190, 240),
+            ("hududlari,", 262, 320),
+            ("shu", 342, 360),
+            ("jumladan", 382, 430),
+            ("bolalar", 452, 480),
+            ("oʻyin", 488, 500),
+        ],
+        100,
+    )
+    rest = [
+        line(
+            "maydonchalarining tuprogʻi qoʻrgʻoshin va boshqa zararli moddalar bilan", 100 + PITCH
+        ),
+        line("ifloslanishiga yoʻl qoʻyilmaydi.", 100 + 2 * PITCH, x1=260),
+    ]
+    lines = rejoin_spread_rows([stamp, *first, *rest], STATS)
+    assert any(
+        text.startswith(
+            "10. Aholi punktlari hududlari, shu jumladan bolalar oʻyin\nmaydonchalarining"
+        )
+        for text in texts(lines)
+    )
+
+
+def test_a_centred_title_over_two_lines_is_one_block() -> None:
+    lines = [
+        line(
+            "Aholi punktlari hududlari tuprogʻining sanitariya-gigiyenik",
+            100,
+            x0=140,
+            x1=498,
+            bold=1.0,
+        ),
+        line("holatini baholash koʻrsatkichlari", 100 + PITCH, x0=221, x1=417, bold=1.0),
+        line("Jadvalda koʻrsatkichlar keltirilgan.", 100 + 3 * PITCH),
+    ]
+    assert texts(lines)[0] == (
+        "Aholi punktlari hududlari tuprogʻining sanitariya-gigiyenik\n"
+        "holatini baholash koʻrsatkichlari"
+    )
+
+
+def test_an_indented_first_line_is_not_taken_for_a_centred_block() -> None:
+    lines = [
+        line("Birinchi xatboshi qisqa satr bilan tugaydi.", 100, x1=320),
+        line("Ikkinchi xatboshi xat boshidan boshlanib, toʻliq", 100 + PITCH, x0=108),
+        line("satrlar bilan davom etadi va shu yerda tugaydi.", 100 + 2 * PITCH, x1=360),
+    ]
+    assert texts(lines)[0] == "Birinchi xatboshi qisqa satr bilan tugaydi."
+
+
+def test_bullet_glued_to_its_text_keeps_its_hanging_lines() -> None:
+    lines = [
+        line("■Always put import statements (including from x import y) at the", 100),
+        line("top of a file.", 100 + PITCH, x0=84, x1=160),
+        line("■Always use absolute names for modules when importing them", 100 + 2 * PITCH),
+    ]
+    assert texts(lines) == [
+        "■Always put import statements (including from x import y) at the\ntop of a file.",
+        "■Always use absolute names for modules when importing them",
+    ]

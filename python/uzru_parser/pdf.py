@@ -24,8 +24,14 @@ from . import layout_model as layout_models
 from .assemble import assemble_document
 from .columns import reading_regions
 from .confidence import page_confidence
-from .layout import mark_footnotes, mark_title_page, mark_toc, strip_page_furniture
-from .models import Document, Page
+from .layout import (
+    mark_footnotes,
+    mark_imprint_page,
+    mark_title_page,
+    mark_toc,
+    strip_page_furniture,
+)
+from .models import Block, Document, Page
 from .paragraphs import (
     BBox,
     LayoutStats,
@@ -34,9 +40,17 @@ from .paragraphs import (
     figure_regions,
     group_formula_debris,
     layout_stats,
+    rejoin_spread_rows,
 )
 from .profile import StyleProfile, build_profile
-from .structure import OutlineEntry, RawBlock, build_blocks
+from .structure import (
+    OutlineEntry,
+    RawBlock,
+    build_blocks,
+    document_title,
+    has_real_words,
+    heading_tag_failures,
+)
 from .tables import table_score
 from .text import CleanStats, Hyphenator, clean, compound_pairs, map_symbol_font
 
@@ -54,6 +68,13 @@ _SENTENCE_END = re.compile(r"[.!?:…;]\s*$")
 _LONG_WORD = re.compile(r"[^\W\d_]{4,}")
 #: A table cell holding a number: "12", "-3,5", "1 250", "45%", "(12.0)".
 _NUMBER_CELL = re.compile(r"^\s*[-–+(]?\d[\d\s.,]*%?\)?\s*$")
+#: A word of a title, for comparing titles word by word.
+TITLE_WORD = re.compile(r"[^\W\d_]{3,}")
+#: The text standing for a picture inside the running text (a formula or chart set as an
+#: image): its content is not read, but its place in the text is kept.
+PICTURE_TEXT = "[image]"
+#: A page number as printed: "14", "- 14 -", "[14]".
+PAGE_NUMBER_CELL = re.compile(r"[-–\[(]?\s*\d{1,4}\s*[-–\])]?")
 _SUBSET_PREFIX = re.compile(r"^[A-Z]{6}\+")
 _FONT_STYLE_WORDS = re.compile(
     r"(bold|italic|oblique|regular|semibold|demibold|medium|light|black|heavy|roman$)"
@@ -73,6 +94,7 @@ class _PageContent:
     boxes: list[BBox]  # filled rectangles that may hold side boxes of text
     page_box: BBox
     needs_ocr: bool
+    pictures: list[BBox] = field(default_factory=list)  # images inside the running text
 
 
 @dataclass
@@ -108,6 +130,20 @@ def parse_pdf(
         ]
         tags = tagged.inspect(pdf)
         read = _read_tagged(pdf) if tags.usable else None
+        if read is not None and read.check.ok:
+            named, failing = heading_tag_failures(read.blocks)
+            if (
+                failing >= config.TAG_HEADING_MIN_FAILURES
+                and failing >= config.TAG_HEADING_MAX_FAILING_SHARE * named
+            ):
+                # The author styled list items and paragraphs as headings: the tags still
+                # give the paragraphs, lists and tables, but the headings come from the
+                # rules (style, numbering, sequences) as on an untagged PDF.
+                for raw in read.blocks:
+                    if raw.heading_source == "tags":
+                        raw.heading_level = None
+                        raw.heading_source = None
+                read.check.reason = f"{failing} of {named} heading tags are not headings; ignored"
         if read is not None and read.check.ok:
             stats.add(read.stats)
             document = _tagged_document(path, meta, outline, read, tags, stats)
@@ -156,7 +192,10 @@ def parse_pdf(
         "pdf",
         pages,
         document_blocks,
-        title=meta.get("title") or _title_page_title(raw_blocks),
+        title=document_title(document_blocks)
+        or _fuller_title(
+            _title_page_title(raw_blocks), _confirmed_title(meta.get("title"), document_blocks)
+        ),
         author=meta.get("author"),
         extra={
             "removed_page_furniture": removed,
@@ -200,6 +239,7 @@ class _RulesPass:
         raw_blocks, removed = strip_page_furniture(raw_blocks, heights)
         mark_footnotes(raw_blocks, heights, self.layout.body_size)
         mark_title_page(raw_blocks, len(self.pages))
+        mark_imprint_page(raw_blocks)
         mark_toc(raw_blocks, len(self.pages))
         raw_blocks = group_formula_debris(raw_blocks)
         profile = build_profile(raw_blocks, heights)
@@ -220,6 +260,7 @@ class _RulesPass:
                 and not any(_inside(line.bbox, table.bbox) for table in hints.found_tables)
             ]
             drawings = drawings + hints.figures
+        lines = rejoin_spread_rows(lines, layout)
         regions = figure_regions(drawings, content.page_box, layout.body_size, lines)
         if hints is not None and hints.order:
             parts = layout_models.order_lines(lines, hints.order)
@@ -234,7 +275,8 @@ class _RulesPass:
             block.text = self.hyphenator.repair(block.text)
         if hints is not None:
             _apply_marks(blocks, hints, content.page_box)
-        return _merge_tables(blocks, tables), parts, tables
+        pictures = [_picture_block(box, content.number) for box in content.pictures]
+        return _merge_tables(blocks, [*tables, *pictures]), parts, tables
 
 
 def _apply_marks(blocks: list[RawBlock], hints: layout_models.Hints, page_box: BBox) -> None:
@@ -385,6 +427,7 @@ def _read_tagged(pdf: pymupdf.Document) -> _TaggedRead:
         blocks: list[tuple[tagged.Key | None, RawBlock]] = [
             (unit.key, tagged.unit_block(unit, content.number, elements.spans)) for unit in units
         ]
+        loose = rejoin_spread_rows(loose, layout)
         regions = figure_regions(content.drawings, content.page_box, layout.body_size, loose)
         loose_blocks = [
             block
@@ -413,6 +456,8 @@ def _tagged_document(
     heights = {page.number: page.height for page in read.pages}
     raw_blocks, removed = strip_page_furniture(read.blocks, heights)
     mark_footnotes(raw_blocks, heights, read.layout.body_size)
+    mark_title_page(raw_blocks, len(read.pages))
+    mark_imprint_page(raw_blocks)
     mark_toc(raw_blocks, len(read.pages))
     raw_blocks = group_formula_debris(raw_blocks)
     tagged.mark_spacing(raw_blocks, read.layout)
@@ -437,7 +482,10 @@ def _tagged_document(
         "pdf",
         read.pages,
         document_blocks,
-        title=meta.get("title") or None,
+        title=document_title(document_blocks)
+        or _fuller_title(
+            _title_page_title(raw_blocks), _confirmed_title(meta.get("title"), document_blocks)
+        ),
         author=meta.get("author"),
         extra={
             "removed_page_furniture": removed,
@@ -517,9 +565,37 @@ def _open(path: Path) -> pymupdf.Document:
     return pdf
 
 
+def _confirmed_title(title: str | None, blocks: list[Block]) -> str | None:
+    """The file's own title when the document's first pages say it too, or its first page
+    has every word of it (a designed cover sets them apart: "Huntme" / "Mobile App
+    Redesign"): a web portal's name or "Microsoft Word - draft.docx" in the file properties
+    is no title."""
+    if not title or not title.strip():
+        return None
+    wanted = " ".join(clean(title).casefold().split())
+    text = " ".join(" ".join(b.text.split()) for b in blocks if b.page <= 3).casefold()
+    if wanted and wanted in text:
+        return title.strip()
+    first = set(TITLE_WORD.findall(" ".join(b.text for b in blocks if b.page == 1).casefold()))
+    words = TITLE_WORD.findall(wanted)
+    enough = len(words) >= config.MIN_COVER_TITLE_WORDS
+    return title.strip() if enough and all(word in first for word in words) else None
+
+
+def _fuller_title(page_title: str | None, file_title: str | None) -> str | None:
+    """The title page's largest lines, or the file's confirmed title when it says the same
+    and more (the cover's large "Huntme" is part of "Huntme Mobile App Redesign")."""
+    if not page_title or not file_title:
+        return page_title or file_title
+    shown = set(TITLE_WORD.findall(page_title.casefold()))
+    return file_title if shown <= set(TITLE_WORD.findall(file_title.casefold())) else page_title
+
+
 def _title_page_title(blocks: list[RawBlock]) -> str | None:
     """The title page's largest lines, in reading order, when the file names no title."""
-    page = [b for b in blocks if b.role == "title_page" and b.font_size and b.text.strip()]
+    page = [
+        b for b in blocks if b.role == "title_page" and b.font_size and has_real_words(b.text)
+    ]  # a logo's letter is set larger than the title but says nothing
     if not page:
         return None
     largest = max(b.font_size or 0.0 for b in page)
@@ -569,7 +645,37 @@ def _read_page(
         boxes=[tuple(d["rect"]) for d in drawings if d.get("fill") is not None],
         page_box=tuple(page.rect),
         needs_ocr=_is_scanned(images, tuple(page.rect), chars),
+        pictures=_inline_pictures(images, lines, tables, tuple(page.rect)),
     )
+
+
+def _inline_pictures(
+    images: list[BBox], lines: list[Line], tables: list[RawBlock], page_box: BBox
+) -> list[BBox]:
+    """Images inside the running text: a formula or a chart set as a picture, with text above
+    and below and across the text column, smaller than a page. Their content cannot be read
+    without OCR, but they must not vanish: each gets a placeholder block."""
+    x0, y0, x1, y1 = page_box
+    area = (x1 - x0) * (y1 - y0)
+    pictures: list[BBox] = []
+    for box in images:
+        width, height = box[2] - box[0], box[3] - box[1]
+        if area <= 0 or width * height > config.INLINE_PICTURE_MAX_SHARE * area:
+            continue
+        if height < config.INLINE_PICTURE_MIN_HEIGHT or any(
+            _overlap(box, t.bbox) > 0 for t in tables
+        ):
+            continue
+        beside = [line for line in lines if line.bbox[0] < box[2] and line.bbox[2] > box[0]]
+        above = any(line.bbox[3] <= box[1] + 1 for line in beside)
+        below = any(line.bbox[1] >= box[3] - 1 for line in beside)
+        if above and below and not any(_inside(box, other) for other in pictures):
+            pictures.append(box)
+    return pictures
+
+
+def _picture_block(box: BBox, number: int) -> RawBlock:
+    return RawBlock(text=PICTURE_TEXT, page=number, bbox=box, role="image")
 
 
 def _is_scanned(images: list[BBox], page_box: BBox, chars: int) -> bool:
@@ -759,11 +865,20 @@ def _tables_from(found: list[Any], number: int) -> list[RawBlock]:
                 if column < len(grid[below]) and grid[below][column] is None:
                     grid[below][column] = grid[row][column]
         rows = [[cell or "" for cell in row] for row in grid]
+        # A table frame running to the page bottom (the table goes on overleaf) also encloses
+        # the page number: a last row holding one bare number is that, not table content.
+        while rows and _page_number_row(rows[-1]):
+            rows.pop()
         if len(rows) >= config.MIN_TABLE_ROWS and _is_table(rows):
             raw = RawBlock(text="", page=number, bbox=tuple(table.bbox), rows=rows)
             raw.spans = spans or None
             tables.append(raw)
     return tables
+
+
+def _page_number_row(row: list[str]) -> bool:
+    filled = [cell.strip() for cell in row if cell and cell.strip()]
+    return len(filled) == 1 and len(row) > 1 and PAGE_NUMBER_CELL.fullmatch(filled[0]) is not None
 
 
 def _cell_spans(table: Any) -> list[tuple[int, int, int, int]]:

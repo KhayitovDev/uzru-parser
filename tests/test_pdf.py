@@ -569,3 +569,61 @@ def test_image_only_pdf_needs_ocr(tmp_path: Path) -> None:
     doc.close()
     document = parse(path)
     assert document.pages[0].needs_ocr and not document.blocks
+
+
+def test_a_picture_inside_the_text_keeps_its_place_and_is_reported(tmp_path: Path) -> None:
+    """A formula set as an image cannot be read, but it must not vanish silently."""
+    pdf = pymupdf.open()
+    page = pdf.new_page()
+    page.insert_font(fontname="R", fontfile=cyrillic_font())
+    page.insert_textbox(
+        pymupdf.Rect(72, 72, 523, 120),
+        "Xavflilik indeksi quyidagi formula asosida hisoblanadi:",
+        fontname="R",
+        fontsize=11,
+    )
+    picture = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 120, 30))
+    picture.clear_with(200)
+    page.insert_image(pymupdf.Rect(200, 130, 380, 175), pixmap=picture)
+    page.insert_textbox(
+        pymupdf.Rect(72, 190, 523, 240),
+        "bu yerda: REMK tuproqdagi zararli moddaning ruxsat etilgan konsentratsiyasi.",
+        fontname="R",
+        fontsize=11,
+    )
+    path = tmp_path / "formula.pdf"
+    pdf.save(path)
+    document = parse(path)
+    texts = [b.text for b in document.blocks]
+    position = texts.index("[image]")
+    assert "formula asosida" in texts[position - 1] and texts[position + 1].startswith("bu yerda")
+    codes = [w["code"] for w in document.metadata.extra["quality"]["warnings"]]
+    assert "pictures_not_read" in codes
+
+
+def test_a_file_title_is_confirmed_by_the_cover_word_by_word() -> None:
+    from uzru_parser import Block, BlockType
+
+    cover = [
+        Block(type=BlockType.PARAGRAPH, text=text, page=1)
+        for text in ("H", "DESIGN PROPOSAL", "Huntme", "Mobile App Redesign")
+    ]
+    title = "Huntme Mobile App Redesign — Design Proposal"
+    assert pdf._confirmed_title(title, cover) == title
+    portal = "Normativ-huquqiy hujjatlar loyihasini ishlab chiqish yagona elektron tizimi"
+    assert pdf._confirmed_title(portal, cover) is None
+    assert pdf._confirmed_title("Merged with PDFCreator Online", cover) is None
+    # The cover's large "Huntme" is part of the file's title, which says more.
+    assert pdf._fuller_title("Huntme", title) == title
+    assert pdf._fuller_title("BANK ISHI ASOSLARI", title) == "BANK ISHI ASOSLARI"
+
+
+def test_a_logo_letter_is_no_title() -> None:
+    from uzru_parser.structure import RawBlock
+
+    cover = [
+        RawBlock(text="H", page=1, font_size=60.0, role="title_page"),
+        RawBlock(text="Huntme", page=1, font_size=40.0, role="title_page"),
+        RawBlock(text="Design proposal for the app", page=1, font_size=14.0, role="title_page"),
+    ]
+    assert pdf._title_page_title(cover) == "Huntme"

@@ -20,19 +20,32 @@ from .profile import SIZE_STEP, StyleProfile, style_of
 from .text import (
     CleanStats,
     Hyphenator,
+    bare_keyword_rank,
     clean,
     detect_language,
     ends_with_abbreviation,
     is_known_word,
+    is_label,
+    names_appendix,
     numbering_info,
 )
 
 CELL_SEPARATOR = " | "
 SENTENCE_END = ".?!:…;"
+#: Initials and a surname in capitals closing a line: "A. ARIPOV", "Sh. MIRZIYOYEV",
+#: "И.И. ИВАНОВ".
+SIGNATURE = re.compile(
+    r"(?:^|\s)(?:[A-ZА-ЯЁЎҚҒҲ][a-zа-яёўқғҳ]?\.\s?){1,2}"
+    r"[A-ZА-ЯЁЎҚҒҲ][A-ZА-ЯЁЎҚҒҲʻʼ‘’'-]{2,}$"
+)
+#: The leading section number of a title: "5.5." in "5.5. Tijorat banklarining ...".
+SECTION_NUMBER = re.compile(r"((?:\d{1,3}\.){1,4}\d{0,3}\.?)\s")
+#: A full stop, question or exclamation mark followed by a capital inside a text.
+INNER_SENTENCE_END = re.compile(r"[.!?]\s+[A-ZА-ЯЁЎҚҒҲ]")
 LIST_KINDS = ("bullet", "ordered")
 SECTION_KINDS = ("decimal", "keyword")
 #: Material set apart from the running text: a sentence may run on across it.
-OUT_OF_FLOW_ROLES = ("figure", "formula")
+OUT_OF_FLOW_ROLES = ("figure", "formula", "image")
 
 PLAN_LINE = re.compile(rf"^\s*(?:{'|'.join(config.PLAN_WORDS)})\s*:", re.IGNORECASE)
 FOOTNOTE_NUMBER = re.compile(r"^\s*(\d{1,3})(?:\s+|(?=[^\W\d_]))")
@@ -135,6 +148,11 @@ def build_blocks(
     repair = Hyphenator(sorted(compounds)).repair
     titles = _TitleIndex(outline or [], raw_blocks)
     raws = [part for raw in raw_blocks for part in _split_raw(raw, titles)]
+    artifacts = [raw for raw in raws if _is_layout_artifact(raw)]
+    if artifacts:
+        raws = [raw for raw in raws if not _is_layout_artifact(raw)]
+        if stats is not None:
+            stats.layout_artifacts_removed += len(artifacts)
     body_size = body_font_size(raws) or 0.0
     prepared = [(raw, _clean(raw, repair, stats, text_is_clean)) for raw in raws]
     headings = _decide_headings(prepared, body_size, titles, _quoted(prepared), profile)
@@ -181,8 +199,65 @@ def build_blocks(
     for block in {id(b): b for b in extended}.values():  # first item alone decided it
         block.language = detect_language(block.text)
     blocks = _join_split_paragraphs(blocks, repair, page_layout)
+    blocks = _stamps_after_labels(blocks)
+    if page_layout:
+        blocks = _join_split_tables(blocks)
+        _mark_contents_titles(blocks)
+    _mark_leading_title(blocks, outline_levels=not page_layout)
     _inherit_short_languages(blocks)
     return blocks
+
+
+def _stamps_after_labels(blocks: list[Block]) -> list[Block]:
+    """An appendix that opens its page with a stamp written as separate short lines
+    ("Oʻzbekiston Respublikasi" / "Markaziy banki boshqaruvining" / ... / "22/5-son qaroriga")
+    and then its label ("ILOVA"): the stamp says what the appendix belongs to, so it goes
+    after the label, as one paragraph, instead of closing the section before."""
+    out: list[Block] = []
+    for block in blocks:
+        if block.type is BlockType.HEADING and is_label(block.text) and names_appendix(block.text):
+            start = len(out)
+            while start and _stamp_line(out[start - 1], block.page):
+                start -= 1
+            run = out[start:]
+            opens_page = start == 0 or out[start - 1].page < block.page
+            words = sum(len(b.text.split()) for b in run)
+            if len(run) > 1 and opens_page and words <= config.STAMP_MAX_WORDS:
+                stamp = run[0]
+                stamp.text = " ".join(" ".join(b.text.split()) for b in run)
+                stamp.language = detect_language(stamp.text)
+                del out[start:]
+                out.extend([block, stamp])
+                continue
+        out.append(block)
+    return out
+
+
+def _stamp_line(block: Block, page: int) -> bool:
+    text = block.text.strip()
+    return (
+        block.page == page
+        and block.type is BlockType.PARAGRAPH
+        and not block.extra.get("role")
+        and bool(text)
+        and "\n" not in text
+        and len(text.split()) <= config.STAMP_LINE_WORDS
+        and text[-1] not in SENTENCE_END
+    )
+
+
+def heading_tag_failures(raw_blocks: list[RawBlock]) -> tuple[int, int]:
+    """(headings a tagged PDF names, how many of them do not read like headings: list items,
+    whole paragraphs, formulas). Many failures mean the author styled text as headings, so
+    the tags say nothing reliable about the structure."""
+    body_size = body_font_size(raw_blocks) or 0.0
+    named = [
+        raw
+        for raw in raw_blocks
+        if raw.heading_source == "tags" and raw.heading_level is not None and raw.text.strip()
+    ]
+    failing = sum(1 for raw in named if _signals(raw.text, raw, body_size, True) is None)
+    return len(named), failing
 
 
 def body_font_size(raw_blocks: list[RawBlock]) -> float | None:
@@ -287,6 +362,164 @@ def _blank_repeated_header_cells(rows: list[list[str]]) -> list[list[str]]:
             if row[c] and row[c] == row[c - 1] and any(ch.isalpha() for ch in row[c]):
                 row[c] = ""
     return rows
+
+
+def _mark_leading_title(blocks: list[Block], outline_levels: bool = False) -> None:
+    """Unnumbered headings opening the document before any text (an act's issuer and title
+    on its first page) are its title, not its first section: two or more of them, or one of
+    at least LEADING_TITLE_WORDS words. They become ``title_page`` text marked ``title``, so
+    the reader can name the document after them. A lone short "ВВЕДЕНИЕ" stays a heading.
+    With ``outline_levels`` (headings from styles or tags) they must share one level (two
+    sibling headings with nothing between them are one title), or their top level must not
+    come back later: a style used only for them is the title's, one used again is the
+    outline's ("Introduction" / "Background" ... "Methods")."""
+    leading: list[Block] = []
+    for block in blocks:
+        role = block.extra.get("role")
+        if role == "title_page" or role in OUT_OF_FLOW_ROLES or block.type is BlockType.FOOTNOTE:
+            continue
+        if block.type is not BlockType.HEADING or block.page > 1:
+            break
+        if numbering_info(block.text) or bare_keyword_rank(block.text) is not None:
+            break
+        leading.append(block)
+    long_one = len(leading) == 1 and len(leading[0].text.split()) >= config.LEADING_TITLE_WORDS
+    more = sum(1 for block in blocks if block.type is BlockType.HEADING) > len(leading)
+    if (len(leading) < 2 and not long_one) or not more:
+        return  # without an outline after them, the opening headings are the outline
+    if outline_levels and len({block.level for block in leading}) > 1:
+        top = min(block.level or 1 for block in leading)
+        later = blocks[blocks.index(leading[-1]) + 1 :]
+        if any(
+            b.type is BlockType.HEADING
+            and (b.level or 1) <= top
+            and not (is_label(b.text) and names_appendix(b.text))  # "ILOVA" opens an annex
+            for b in later
+        ):
+            return
+    for block in leading:
+        block.type = BlockType.PARAGRAPH
+        block.level = None
+        block.extra["role"] = "title_page"
+        block.extra["title"] = True
+    # The outline under the title starts at level 1 again.
+    used = sorted({b.level for b in blocks if b.type is BlockType.HEADING and b.level})
+    rank = {level: position for position, level in enumerate(used, start=1)}
+    for block in blocks:
+        if block.type is BlockType.HEADING and block.level:
+            block.level = rank[block.level]
+
+
+def _mark_contents_titles(blocks: list[Block]) -> None:
+    """A short heading right above a contents list ("MUNDARIJA", "СОДЕРЖАНИЕ") is part of
+    the contents, not a section."""
+    for block, following in zip(blocks, blocks[1:], strict=False):
+        if (
+            block.type is BlockType.HEADING
+            and following.extra.get("role") == "toc"
+            and len(block.text.split()) <= config.CONTENTS_TITLE_WORDS
+        ):
+            block.type = BlockType.PARAGRAPH
+            block.level = None
+            block.extra["role"] = "toc"
+
+
+def document_title(blocks: list[Block]) -> str | None:
+    """The title made of the headings that open the document (see ``_mark_leading_title``)."""
+    parts = [" ".join(b.text.split()) for b in blocks if b.extra.get("title")]
+    return " ".join(parts) or None
+
+
+def _join_split_tables(blocks: list[Block]) -> list[Block]:
+    """A table cut by a page break is one table. The part on the next page continues the
+    table that ends the previous page when it opens the page with the same columns at the
+    same place; a repeated header is dropped, and a short fragment left between the parts
+    (a cell's last words, "miqdori") goes back into the row it was cut from."""
+    out: list[Block] = []
+    for block in blocks:
+        if block.type is BlockType.TABLE and out:
+            fragment = _cell_fragment(out, block)
+            before = [b for b in out if b is not fragment and not _out_of_flow(b)]
+            table = before[-1] if before else None
+            if table is not None and _continues_table(table, block):
+                if fragment is not None:
+                    _append_to_last_row(table, fragment.text)
+                    out = [b for b in out if b is not fragment]
+                _append_rows(table, block)
+                continue
+        out.append(block)
+    return out
+
+
+def _cell_fragment(out: list[Block], table: Block) -> Block | None:
+    """A few lowercase words right before ``table`` on its page, after a table that ends the
+    page before: the rest of a cell the page break cut."""
+    last = out[-1]
+    if (
+        last.type is not BlockType.PARAGRAPH
+        or last.page != table.page
+        or len(out) < 2
+        or out[-2].type is not BlockType.TABLE
+        or len(last.text.split()) > config.TABLE_FRAGMENT_WORDS
+        or not last.text[:1].islower()
+        or last.text.rstrip()[-1:] in SENTENCE_END
+    ):
+        return None
+    return last
+
+
+def _table_columns(block: Block) -> int:
+    rows = block.extra.get("rows") or []
+    return max((len(row) for row in rows), default=0)
+
+
+def _continues_table(previous: Block, block: Block) -> bool:
+    if previous.type is not BlockType.TABLE:
+        return False
+    if block.page != previous.extra.get("page_end", previous.page) + 1:
+        return False
+    if _table_columns(previous) != _table_columns(block) or not _table_columns(block):
+        return False
+    if previous.bbox and block.bbox:
+        width = max(previous.bbox[2] - previous.bbox[0], 1.0)
+        slack = config.TABLE_CONTINUATION_SLACK * width
+        if (
+            abs(previous.bbox[0] - block.bbox[0]) > slack
+            or abs(previous.bbox[2] - block.bbox[2]) > slack
+        ):
+            return False
+    return True
+
+
+def _append_to_last_row(table: Block, text: str) -> None:
+    row = table.extra["rows"][-1]
+    column = next((i for i, cell in enumerate(row) if cell.strip()), 0)
+    row[column] = f"{row[column]} {text}".strip()
+
+
+def _same_row(a: list[str], b: list[str]) -> bool:
+    return [" ".join(cell.split()) for cell in a] == [" ".join(cell.split()) for cell in b]
+
+
+def _append_rows(table: Block, block: Block) -> None:
+    rows: list[list[str]] = table.extra["rows"]
+    new: list[list[str]] = block.extra["rows"]
+    repeated = 0
+    while repeated < min(len(rows), len(new) - 1) and _same_row(new[repeated], rows[repeated]):
+        repeated += 1
+    offset = len(rows) - repeated
+    rows.extend(new[repeated:])
+    spans = [
+        {**span, "row": span["row"] + offset}
+        for span in block.extra.get("spans", [])
+        if span["row"] >= repeated
+    ]
+    if spans:
+        table.extra.setdefault("spans", []).extend(spans)
+    table.text = _rows_text(rows)
+    table.raw_text = "\n".join(part for part in (table.raw_text, block.raw_text) if part)
+    table.extra["page_end"] = block.extra.get("page_end", block.page)
+    table.language = detect_language(table.text)
 
 
 def _rows_text(rows: list[list[str]]) -> str:
@@ -498,6 +731,11 @@ def _split_raw(raw: RawBlock, titles: _TitleIndex) -> list[RawBlock]:
         parts[0].original = raw.original
         return [piece for part in parts for piece in _split_raw(part, titles)]
     lines = groups[0] if groups else []
+    if len(lines) >= 2 and is_label(lines[-1]) and not any(is_label(line) for line in lines[:-1]):
+        # An appendix stamp: "Vazirlar Mahkamasining ... qaroriga" / "1-ILOVA". The label is
+        # the appendix's heading; the lines above say what it is appended to, so they open
+        # the appendix instead of closing the part before it.
+        return [_piece(raw, lines[-1:]), *_split_raw(_piece(raw, lines[:-1]), titles)]
     if lines and PLAN_LINE.match(lines[0]):
         return _plan_blocks(raw, lines)
     if len(lines) < 2:
@@ -663,6 +901,44 @@ def _is_candidate(raw: RawBlock) -> bool:
     return not (raw.list_item or raw.footnote or raw.role or raw.rows is not None or raw.in_figure)
 
 
+def is_signature(text: str) -> bool:
+    """A signature line: a position followed by the signer's initials and surname in
+    capitals ("Oʻzbekiston Respublikasining Bosh vaziri A. ARIPOV", "Председатель И. ИВАНОВ").
+    It closes an act; it heads nothing."""
+    return SIGNATURE.search(text.strip()) is not None
+
+
+def _is_layout_artifact(raw: RawBlock) -> bool:
+    """A block of one or two punctuation marks and nothing else (a "." that a web page
+    prints as a spacer paragraph): layout, not text. Tables and footnotes are kept."""
+    text = raw.text.strip()
+    return (
+        raw.rows is None
+        and not raw.footnote
+        and 0 < len(text) <= config.MAX_ARTIFACT_CHARS
+        and not any(char.isalnum() for char in text)
+    )
+
+
+def _listed_section(raw: RawBlock, text: str) -> bool:
+    """A section title the author typed as a numbered list item ("4.3. Foiz riski ..." made
+    with Word's numbering): section numbering, bold, no sentence end. It may still become a
+    heading; an ordinary list item ("1) ...", "- ...") may not."""
+    if not raw.list_item or raw.rows is not None or raw.footnote or raw.role or raw.in_figure:
+        return False
+    flat = _flatten(text)
+    numbering = numbering_info(flat)
+    section = numbering is not None and (
+        numbering[0] == "keyword" or (numbering[0] == "decimal" and numbering[1] >= 2)
+    )
+    return section and raw.bold >= config.BOLD_SHARE and flat[-1:] not in SENTENCE_END + ","
+
+
+def _is_approval_stamp(text: str) -> bool:
+    """ "УТВЕРЖДЕНА" / "TASDIQLANGAN" alone: the first line of an approval stamp."""
+    return text.strip(" .:").casefold() in config.APPROVAL_WORDS
+
+
 def _is_formula(text: str) -> bool:
     """ "M = APS x I": a math operator and hardly any real words."""
     if not FORMULA_OPERATOR.search(text):
@@ -677,8 +953,19 @@ def _signals(text: str, raw: RawBlock, body_size: float, styled: bool = False) -
     as run-in subheadings of Russian and Uzbek textbooks do ("Валюта бозори.")."""
     flat = _flatten(text)
     numbering = numbering_info(flat)
-    keyword = numbering is not None and numbering[0] == "keyword"
-    limit = config.MAX_KEYWORD_HEADING_CHARS if keyword else config.MAX_HEADING_CHARS
+    keyword = (numbering is not None and numbering[0] == "keyword") or (
+        numbering is None and bare_keyword_rank(flat) is not None
+    )
+    # A bold numbered title ("VI. Bojxona organlari infratuzilmasini ...") may be long, like
+    # a chapter word's, as long as it is one phrase rather than sentences.
+    long_title = (
+        numbering is not None
+        and numbering[0] in ("ordered", "decimal")
+        and raw.bold >= config.BOLD_SHARE
+        and flat[-1:] not in ".;:"
+        and not INNER_SENTENCE_END.search(flat.split(" ", 1)[-1])
+    )
+    limit = config.MAX_KEYWORD_HEADING_CHARS if keyword or long_title else config.MAX_HEADING_CHARS
     # A numbered title ("12-modda. ...") wraps over more lines in a narrow column.
     lines = config.PROFILE_HEADING_MAX_LINES if keyword else config.MAX_HEADING_LINES
     if len(flat) > limit or text.count("\n") + 1 > lines:
@@ -689,7 +976,7 @@ def _signals(text: str, raw: RawBlock, body_size: float, styled: bool = False) -
         return None
     if not numbering and not HEADING_WORD.search(flat):  # "B FAM": a chart's letters
         return None
-    if _is_formula(flat):
+    if _is_formula(flat) or is_signature(flat) or _is_approval_stamp(flat):
         return None
     uppercase = _uppercase(flat)
     section = keyword or (numbering is not None and numbering[0] == "decimal" and numbering[1] >= 2)
@@ -722,6 +1009,8 @@ def _kind(text: str, raw: RawBlock, detailed: bool = False) -> tuple[object, ...
     numbering = numbering_info(_flatten(text))
     if numbering and numbering[0] == "keyword":
         return ("kw", numbering[1])
+    if numbering is None and (rank := bare_keyword_rank(_flatten(text))) is not None:
+        return ("kw", rank)
     if numbering and numbering[0] in ("decimal", "ordered"):
         return ("dec", numbering[1])
     font = ("font", _size_key(raw.font_size or 0.0), raw.bold >= config.BOLD_SHARE)
@@ -762,19 +1051,27 @@ def _same_title(raw: RawBlock, following: RawBlock) -> bool:
     )
 
 
-def _set_apart(index: int, prepared: list[tuple[RawBlock, str]], profile: StyleProfile) -> bool:
+def _set_apart(
+    index: int,
+    prepared: list[tuple[RawBlock, str]],
+    profile: StyleProfile,
+    under_heading: bool = False,
+) -> bool:
     """The block stands apart from the text around it: space above it (or the top of its
-    page) and, below it, space, the start of the body text, a list or a table."""
+    page, or a heading in another style right above it: "1.1 Title" / "Simple
+    Explanation") and, below it, space, the start of the body text, a list or a table."""
     raw = prepared[index][0]
-    previous = next(
-        (r for r, t in reversed(prepared[:index]) if t.strip() and not r.footnote), None
-    )
-    rest = [r for r, t in prepared[index + 1 :] if t.strip() and not r.footnote]
+
+    def text(r: RawBlock, t: str) -> bool:  # a picture's placeholder is no text around it
+        return bool(t.strip()) and not r.footnote and r.role != "image"
+
+    previous = next((r for r, t in reversed(prepared[:index]) if text(r, t)), None)
+    rest = [r for r, t in prepared[index + 1 :] if text(r, t)]
     # A title wrapped into several blocks: what follows is what comes after its last line.
     while rest and style_of(raw) != profile.body and _same_title(raw, rest[0]):
         rest = rest[1:]
     following = rest[0] if rest else None
-    above = raw.spaced or previous is None or previous.page != raw.page
+    above = raw.spaced or previous is None or previous.page != raw.page or under_heading
     if following is None:
         return above
     body_after = style_of(following) == profile.body
@@ -796,19 +1093,31 @@ def _decide_headings(
     for index, (raw, text) in enumerate(prepared):
         size = raw.font_size or 0.0
         styled = raw.heading_level is not None and raw.heading_source != "numbering"
-        if not text or not _is_candidate(raw) or (index in quoted and not styled):
+        candidate = _is_candidate(raw) or _listed_section(raw, text)
+        if not text or not candidate or (index in quoted and not styled):
             headings.append(None)
             continue
         if raw.heading_source == "subheading" and raw.heading_level is None:
-            # A reader's subheading (a bold DOCX paragraph): one level below what it follows.
+            # A reader's subheading (a bold DOCX paragraph): one level below what it follows,
+            # if it reads like a heading (not a formula, a signature, a list item).
+            if _signals(text, raw, body_size, True) is None:
+                headings.append(None)
+                continue
             headings.append(_Heading("style", ("below",), size))
             continue
         if raw.heading_level is not None and raw.heading_source == "numbering":
             headings.append(_Heading("numbering", _kind(text, raw), size))
             continue
         if raw.heading_level is not None:
+            # Tags and styles say "heading", but authors also give that style to list items
+            # and whole paragraphs: the text must still read like a heading.
+            if _signals(text, raw, body_size, True) is None:
+                headings.append(None)
+                continue
             source = raw.heading_source or "style"
             headings.append(_Heading(source, ("fixed", raw.heading_level), size, raw.heading_level))
+            if source == "tags" and _is_plain_item(text):
+                plain_items.append(index)  # a tagged "4. ..." still needs its sequence
             continue
         known = titles.match(text, raw.page) if titles else None
         if known is not None and has_real_words(text):
@@ -824,10 +1133,17 @@ def _decide_headings(
             continue
         styled_look = bool(signals & {"bigger", "bold", "uppercase"})
         if use_profile and profile is not None:
+            above = prepared[index - 1][0] if index else None
+            under_heading = (
+                above is not None
+                and headings[-1] is not None
+                and style_of(above) != style_of(raw)
+                and above.page == raw.page
+            )
             accepted = heading_style and (
                 bool(signals & {"number", "keyword"})
                 or raw.layout_title
-                or _set_apart(index, prepared, profile)
+                or _set_apart(index, prepared, profile, under_heading)
             )
             accepted = accepted or (raw.layout_title and styled_look)
             # Outside the heading styles (bold also used in the text, an annex label in the
@@ -854,8 +1170,122 @@ def _decide_headings(
     _drop_captions(headings, prepared, body_size)
     _drop_run_in_titles(headings, prepared)
     _drop_inside_tables(headings, prepared)
+    _drop_diagram_labels(headings, prepared)
     _repeat_heading_decisions(headings, prepared)
+    _complete_section_sequences(headings, prepared, body_size)
+    _roman_chapter_sequences(headings, prepared, body_size)
     return headings
+
+
+def _drop_diagram_labels(
+    headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]]
+) -> None:
+    """A short unnumbered "heading" between other short labels ("Valyuta intervensiyasi" /
+    "Devalʼvatsiya" / "Revalʼvatsiya") is a box of a diagram whose drawing was not found, not
+    a section: a heading is followed by text."""
+
+    def label(position: int) -> bool:
+        if not 0 <= position < len(prepared) or headings[position] is not None:
+            return False
+        raw, text = prepared[position]
+        flat = _flatten(text) if text else ""
+        return (
+            bool(flat)
+            and raw.rows is None
+            and len(flat.split()) <= config.DIAGRAM_LABEL_WORDS
+            and flat[-1:] not in SENTENCE_END
+            and numbering_info(flat) is None
+        )
+
+    for index, heading in enumerate(headings):
+        if heading is None or heading.kind[0] in ("kw", "dec"):
+            continue
+        if label(index - 1) and label(index + 1):
+            headings[index] = None
+
+
+def _complete_section_sequences(
+    headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]], body_size: float
+) -> None:
+    """A bold line numbered as the next section of an accepted one ("5.5." after the heading
+    "5.4.") is a heading too, even in a slightly other size: the numbering sequence is the
+    signal its styling missed. It must still read like a heading."""
+    last: dict[str, int] = {}  # section prefix ("5.") -> last accepted number in it
+    for index, (raw, text) in enumerate(prepared):
+        flat = _flatten(text) if text else ""
+        key = _section_key(flat)
+        if key is None:
+            continue
+        prefix, number = key
+        heading = headings[index]
+        if heading is not None:
+            last[prefix] = number
+            continue
+        follows = last.get(prefix) == number - 1
+        candidate = _is_candidate(raw) or _listed_section(raw, text)
+        if follows and candidate and raw.bold >= config.BOLD_SHARE:
+            if _signals(text, raw, body_size, True) is not None:
+                headings[index] = _Heading("numbering", _kind(text, raw), raw.font_size or 0.0)
+                last[prefix] = number
+
+
+def _roman_chapter_sequences(
+    headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]], body_size: float
+) -> None:
+    """Chapter titles numbered I., II., III. ... in the body's own type (a document converted
+    from a scan keeps no styles): short lines without a sentence end whose numbers follow
+    one another, with text between them. At least ROMAN_CHAPTERS_MIN of them in a row make
+    an outline; a lone "II." line or a roman-numbered list (no text between) does not."""
+    found: list[tuple[int, int]] = []  # (block index, number)
+    for index, (raw, text) in enumerate(prepared):
+        flat = _flatten(text) if text else ""
+        if headings[index] is not None or not ROMAN_SECTION.match(flat):
+            continue
+        if raw.rows is not None or raw.footnote or raw.role or raw.list_item:
+            continue
+        rest = flat.split(" ", 1)[-1]
+        if flat[-1] in SENTENCE_END or not rest[:1].isupper():
+            continue
+        if len(flat) > config.MAX_HEADING_CHARS or _signals(text, raw, body_size, True) is None:
+            continue
+        number = _item_number(flat)
+        if number is not None:
+            found.append((index, number))
+    run: list[int] = []
+    for position, (index, number) in enumerate(found):
+        previous = found[position - 1] if position else None
+        follows = (
+            previous is not None
+            and number == previous[1] + 1
+            and index - previous[0] > 2  # text between the titles
+        )
+        if not follows:
+            _accept_roman_run(headings, prepared, run)
+            run = []
+        run.append(index)
+    _accept_roman_run(headings, prepared, run)
+
+
+def _accept_roman_run(
+    headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]], run: list[int]
+) -> None:
+    if len(run) < config.ROMAN_CHAPTERS_MIN:
+        return
+    for index in run:
+        raw, text = prepared[index]
+        headings[index] = _Heading("numbering", _kind(text, raw), raw.font_size or 0.0)
+
+
+def _section_key(flat: str) -> tuple[str, int] | None:
+    """("5.", 5) for "5.5. Title": a section number of at least two levels, as its parent
+    prefix and its own number."""
+    match = SECTION_NUMBER.match(flat)
+    if match is None:
+        return None
+    parts = match.group(1).rstrip(".").split(".")
+    if len(parts) < 2 or not all(part.isdigit() for part in parts):
+        return None
+    return ".".join(parts[:-1]) + ".", int(parts[-1])
 
 
 def _repeat_heading_decisions(
@@ -893,14 +1323,15 @@ def _drop_captions(
     its caption: marked ``role="caption"``, kept out of the heading tree. A bigger or numbered
     heading above a table stays a heading."""
     for index, heading in enumerate(headings):
-        if heading is None or heading.kind[0] != "font":
+        if heading is None or heading.kind[0] not in ("font", "below"):
             continue
         raw, _ = prepared[index]
         following = _next_block(prepared, index)
         if following is None:
             continue
         below = following[0]
-        if below.rows is None and below.role not in OUT_OF_FLOW_ROLES:
+        # A picture whose content was not read says nothing about the line above it.
+        if below.rows is None and below.role not in ("figure", "formula"):
             continue
         bigger = body_size and (raw.font_size or 0) >= body_size * config.LARGER_FONT_RATIO
         if (bigger and below.rows is not None) or below.page != raw.page:
@@ -927,8 +1358,10 @@ def _drop_run_in_titles(
         if following is None or flat[-1:] in ".!?:;":
             continue
         below, below_text = following
+        below_flat = _flatten(below_text)
         runs_on = (
-            _starts_lowercase(_flatten(below_text))
+            below_flat[:1].islower()  # "2. 2026-yil ..." or "8. ..." opens an item of its own
+            and numbering_info(below_flat) is None
             and below.bold < config.BOLD_SHARE
             and len(_flatten(below_text)) > config.MAX_CONTINUATION_CHARS
         )
@@ -1079,7 +1512,8 @@ def _keep_heading_sequences(
             continue
         for a, b in zip(members, members[1:], strict=False):
             first, second = _item_number(prepared[a][1]), _item_number(prepared[b][1])
-            if first is not None and second == first + 1 and b - a > 1:
+            # One member may be missing (too long, or not styled): I., II., IV. still count.
+            if first is not None and second in (first + 1, first + 2) and b - a > 1:
                 keep.update((a, b))
     for index in plain_items:
         if index not in keep:
@@ -1144,11 +1578,50 @@ def _assign_levels(
             continue
         heading.level = levels[heading.kind]
         style = _style_of(raw, text)
-        if heading.kind[0] == "font" and (match := styles.get(style)) is not None:
+        # Headings of this look whose level the outline gave (bookmarks, tags) decide it; a
+        # numbered heading in the same style only decides when they do not.
+        confirmed = bool(fixed_levels[heading.kind])
+        if heading.kind[0] == "font" and not confirmed and (match := styles.get(style)) is not None:
             heading.level = match
+    _level_by_section_numbers(headings, prepared)
     _enforce_parents(headings, prepared)
-    _place_subheadings(headings)
+    _place_subheadings(headings, prepared)
+    _nest_label_titles(headings, prepared)
+    _level_recurring_headings(headings, prepared)
     _close_level_gaps(headings)
+
+
+def _level_by_section_numbers(
+    headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]]
+) -> None:
+    """Section numbers say the structure when the heading styles contradict them: "2. ..."
+    at one style level and "3. ..." right after it at another (titles formatted by hand)
+    are siblings all the same. Then every "N." takes one level, every "N.M." the next, and
+    so on. Numbering that starts again ("1." after "3.") is not one outline: the styles
+    stay."""
+    numbered: list[tuple[_Heading, tuple[int, ...]]] = []
+    for heading, (_, text) in zip(headings, prepared, strict=True):
+        if heading is None or heading.level is None or not text:
+            continue
+        match = SECTION_NUMBER.match(_flatten(text))
+        if match:
+            numbered.append((heading, tuple(int(p) for p in match.group(1).rstrip(".").split("."))))
+    last: dict[tuple[int, ...], tuple[int, int | None]] = {}  # parent number -> (number, level)
+    contradicted = False
+    for heading, parts in numbered:
+        before = last.get(parts[:-1])
+        if before is not None:
+            if parts[-1] <= before[0]:
+                return
+            contradicted = contradicted or (
+                parts[-1] == before[0] + 1 and heading.level != before[1]
+            )
+        last[parts[:-1]] = (parts[-1], heading.level)
+    if not contradicted:
+        return
+    base = min(heading.level or 1 for heading, _ in numbered)
+    for heading, parts in numbered:
+        heading.level = base + len(parts) - 1
 
 
 def _style_ranks(
@@ -1167,14 +1640,77 @@ def _style_ranks(
     return {kind: counts.most_common(1)[0][0] for kind, counts in seen.items()}
 
 
-def _place_subheadings(headings: list[_Heading | None]) -> None:
-    """A reader's subheading sits one level below the last other heading before it."""
+def _nest_label_titles(
+    headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]]
+) -> None:
+    """An unnumbered heading right under a bare label ("10-ILOVA" / "Hudud toifalari boʻyicha
+    ...") is the labelled part's title: one level below the label, not beside it. The label's
+    stamp ("Vazirlar Mahkamasining ... qaroriga", no sentence end) may stand between them."""
+    previous: int | None = None
+    stamp = False
+    for index, heading in enumerate(headings):
+        text = _flatten(prepared[index][1]) if prepared[index][1] else ""
+        if not text:
+            continue
+        if heading is None:
+            stamp = previous is not None and not stamp and text[-1:] not in SENTENCE_END
+            if not stamp:
+                previous = None
+            continue
+        if previous is not None and heading.level is not None:
+            label = headings[previous]
+            unnumbered = numbering_info(text) is None and bare_keyword_rank(text) is None
+            if label is not None and label.level is not None and unnumbered:
+                if heading.level <= label.level:
+                    heading.level = label.level + 1
+        previous = index if is_label(text) else None
+        stamp = False
+
+
+def _level_recurring_headings(
+    headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]]
+) -> None:
+    """An unnumbered heading whose text comes back in several chapters ("Nazorat uchun
+    savollar", "Вопросы для самопроверки") and that looks like the numbered section titles is
+    one more section of each chapter: it takes their level instead of nesting in the last
+    section. A recurring subheading in another look stays where it is."""
+    counts: Counter[str] = Counter()
+    for heading, (_, text) in zip(headings, prepared, strict=True):
+        if heading is not None and text and numbering_info(_flatten(text)) is None:
+            counts[_bare_title(text)] += 1
+    numbered: dict[tuple[float, bool, bool], int] = {}
+    for heading, (raw, text) in zip(headings, prepared, strict=True):
+        if heading is not None and heading.level is not None and text:
+            numbering = numbering_info(_flatten(text))
+            if numbering is not None and numbering[0] == "decimal":
+                numbered.setdefault(_style_of(raw, text), heading.level)
+    for heading, (raw, text) in zip(headings, prepared, strict=True):
+        if heading is None or heading.level is None or not text:
+            continue
+        if numbering_info(_flatten(text)) is not None:
+            continue
+        level = numbered.get(_style_of(raw, text))
+        if level is not None and counts[_bare_title(text)] >= config.RECURRING_HEADING_MIN:
+            heading.level = level
+
+
+def _place_subheadings(
+    headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]]
+) -> None:
+    """A reader's subheading sits one level below the last other heading before it, unless
+    it looks exactly like headings the document's styles placed (the same size and weight as
+    an outline-level title, without the outline level): then it is one of them."""
+    styled: dict[tuple[float, bool, bool], Counter[int]] = defaultdict(Counter)
+    for heading, (raw, text) in zip(headings, prepared, strict=True):
+        if heading is not None and heading.kind[0] == "fixed" and heading.level is not None:
+            styled[_style_of(raw, text)][heading.level] += 1
     parent = 0
-    for heading in headings:
+    for heading, (raw, text) in zip(headings, prepared, strict=True):
         if heading is None:
             continue
         if heading.kind[0] == "below":
-            heading.level = parent + 1
+            same = styled.get(_style_of(raw, text))
+            heading.level = same.most_common(1)[0][0] if same else parent + 1
         elif heading.level is not None:
             parent = heading.level
 
@@ -1317,6 +1853,8 @@ def _continues_heading(heading: Block, heading_raw: RawBlock, raw: RawBlock, tex
         return False
     if flat.endswith(":"):  # a label introducing what follows ("Plan:"), not the title's end
         return False
+    if is_label(heading.text) and names_appendix(heading.text):
+        return False  # "1-ILOVA" is whole; its stamp or title below is a block of its own
     # A title left open ("... va", "...,") must go on: its next line may differ a little in
     # style (a regular word, another font size) and sit a little further down.
     open_title = _open_title(heading.text)

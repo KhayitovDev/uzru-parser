@@ -232,6 +232,35 @@ def _beside(lines: list[Line], members: list[int]) -> bool:
     )
 
 
+def _text_right_edge(lines: list[Line], stats: LayoutStats) -> float:
+    """Right edge of the body text among ``lines`` (the document's when too few)."""
+    body_right = [line.bbox[2] for line in lines if _is_body(line, stats.body_size)]
+    if len(body_right) < 3:
+        return stats.right_edge
+    return _right_edge(body_right, stats.right_edge)
+
+
+def _text_left_edge(lines: list[Line]) -> float:
+    """Left edge of the running text: lines in the size that holds most characters, so a
+    small stamp or note in the margin does not move it."""
+    chars: dict[float, int] = {}
+    for line in lines:
+        key = _size_key(line.size)
+        chars[key] = chars.get(key, 0) + line.chars
+    main = max(chars, key=lambda key: chars[key])
+    return min(line.bbox[0] for line in lines if _size_key(line.size) == main)
+
+
+def rejoin_spread_rows(lines: list[Line], stats: LayoutStats) -> list[Line]:
+    """A page's justified lines stored word by word, rebuilt before its reading order is
+    found: one stretched row would otherwise look like several narrow columns and be read
+    after the rest of the page."""
+    lines = [line for line in lines if line.text.strip()]
+    if len(lines) < 2:
+        return lines
+    return join_spread_lines(lines, _text_right_edge(lines, stats))
+
+
 def join_spread_lines(lines: list[Line], right_edge: float) -> list[Line]:
     """Put a justified line back together when the PDF stores its widely spaced words as
     separate lines: words of one size on one row that together run from the text's
@@ -239,7 +268,7 @@ def join_spread_lines(lines: list[Line], right_edge: float) -> list[Line]:
     below. Diagram boxes hold several words each and stay apart."""
     if len(lines) < 2:
         return lines
-    left_edge = min(line.bbox[0] for line in lines)
+    left_edge = _text_left_edge(lines)
 
     def starts_at_edge(line: Line) -> bool:
         return line.bbox[0] <= left_edge + config.PARAGRAPH_MAX_INDENT * (line.size or 10.0)
@@ -424,6 +453,10 @@ def _continues(paragraph: list[Line], line: Line, stats: LayoutStats, page_right
         return False
 
     tolerance = config.PARAGRAPH_ALIGN_TOLERANCE * size
+    if _centred_together(last, line, tolerance):
+        # A centred title or stamp over several lines: the lines share a centre, not a left
+        # edge; the block goes on until a line ends a sentence.
+        return not _ends_sentence(last.text)
     if len(paragraph) == 1:
         # Second line: the first may be indented (paragraph) or carry a list marker (hanging).
         hanging = numbering_info(first.text) is not None
@@ -451,6 +484,19 @@ def _continues(paragraph: list[Line], line: Line, stats: LayoutStats, page_right
     # Producers that write whole paragraphs as blocks: a new block is a new paragraph
     # unless the sentence visibly runs on.
     return stats.line_blocks or line.block == last.block or not sentence_break
+
+
+def _centred_together(last: Line, line: Line, tolerance: float) -> bool:
+    """Two lines centred on the same axis whose left and right ends both differ: lines of one
+    centred block. (A justified paragraph shares its right edge, an indented first line moves
+    the centre: those are judged by their left edges.)"""
+    if (
+        abs(line.bbox[0] - last.bbox[0]) <= tolerance
+        or abs(line.bbox[2] - last.bbox[2]) <= tolerance
+    ):
+        return False
+    centre = (last.bbox[0] + last.bbox[2]) / 2
+    return abs((line.bbox[0] + line.bbox[2]) / 2 - centre) <= config.CENTRE_TOLERANCE * tolerance
 
 
 def _next_word_did_not_fit(last: Line, line: Line, page_right: float) -> bool:
@@ -558,15 +604,8 @@ def build_paragraphs(
     lines = [line for line in merge_row_fragments(lines) if line.text.strip()]
     if not lines:
         return []
-
-    def right_edge() -> float:
-        body_right = [line.bbox[2] for line in lines if _is_body(line, stats.body_size)]
-        if len(body_right) < 3:
-            return stats.right_edge
-        return _right_edge(body_right, stats.right_edge)
-
-    lines = join_spread_lines(lines, right_edge())
-    page_right = right_edge()
+    lines = join_spread_lines(lines, _text_right_edge(lines, stats))
+    page_right = _text_right_edge(lines, stats)
     labels = figure_labels(lines, regions or [], stats.body_size, page_right)
 
     left_edge = _left_edge(lines, stats.body_size)

@@ -143,3 +143,22 @@ def test_only_thin_bars_and_stroked_paths_count_as_table_rules() -> None:
     assert _rulings(highlight) == 0
     assert _rulings(underlines) == 0
     assert _rulings(grid) == 4
+
+
+def test_values_starting_lowercase_are_not_words_cut_between_cells() -> None:
+    rows = [
+        ["Umumiy xavflilik indeksi (KΣ)", "Xavflilik darajasi", "Xavflilik sinfi"],
+        ["2,0 dan kam", "oʻta xavfli", "I"],
+        ["2,0 dan 16,0 gacha", "yuqori xavfli", "II"],
+        ["30,0 dan ortiq", "kam xavfli", "IV"],
+    ]
+    assert table_score(rows) == 1.0
+    assert table_score([["tashki", "lot", "5"], ["Kredit", "10", "20"]]) < 1.0
+
+
+def test_a_page_number_inside_a_table_frame_is_not_a_row() -> None:
+    from uzru_parser.pdf import _page_number_row
+
+    assert _page_number_row(["", "14", ""]) and _page_number_row(["- 7 -", ""])
+    assert not _page_number_row(["14", "Ammoniy azoti", "mg/kg"])
+    assert not _page_number_row(["Jami", "125", ""])

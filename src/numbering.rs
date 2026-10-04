@@ -33,7 +33,12 @@ fn bare_lowercase(word: &str) -> String {
 
 const BULLETS: &[char] = &[
     '•', '·', '▪', '●', '○', '■', '◦', '–', '—', '-', '*', '✓', '✔', '➢', '➤', '►', '▶', '◆', '❖',
-    '□',
+    '□', '✦', '✧',
+];
+/// Bullets that are pictures only, never punctuation: one may be glued to its item's text
+/// ("■Always put ...", as some PDF producers write it).
+pub const GLYPH_BULLETS: &[char] = &[
+    '•', '▪', '●', '○', '■', '◦', '✓', '✔', '➢', '➤', '►', '▶', '◆', '❖', '□', '✦', '✧',
 ];
 /// Opening quotes and brackets a title may start with when glued to its number: "5.“Umumiy".
 const OPENING: &[char] = &['“', '«', '„', '"', '(', '‘', '\''];
@@ -204,8 +209,12 @@ fn roman_depth(text: &str) -> Option<usize> {
 
 fn is_bullet(text: &str) -> bool {
     let mut chars = text.chars();
-    chars.next().is_some_and(|c| BULLETS.contains(&c))
-        && chars.next().is_some_and(char::is_whitespace)
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let next = chars.next();
+    (BULLETS.contains(&first) && next.is_some_and(char::is_whitespace))
+        || (GLYPH_BULLETS.contains(&first) && next.is_some_and(char::is_alphanumeric))
 }
 
 fn is_ordered(text: &str) -> bool {
@@ -296,6 +305,10 @@ mod tests {
         assert_eq!(info("5.“Umumiy qoidalar”"), Some(("decimal", 1)));
         assert_eq!(info("1.Qiymat"), Some(("decimal", 1)));
         assert_eq!(info("✓ Valyuta riski"), Some(("bullet", 1)));
+        assert_eq!(info("■Always put import statements"), Some(("bullet", 1)));
+        assert_eq!(info("✦ Always follow the style guide"), Some(("bullet", 1)));
+        assert_eq!(info("-5 daraja"), None);
+        assert_eq!(info("*args"), None);
         assert_eq!(info("1.25 foiz miqdorida"), None);
         assert_eq!(info("5.3 Banklarning turlari"), Some(("decimal", 2)));
     }

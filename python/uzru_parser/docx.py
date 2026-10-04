@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from docx import Document as load_docx
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -16,12 +17,14 @@ from docx.text.paragraph import Paragraph
 from . import config
 from .assemble import assemble_document
 from .models import Document, Page
-from .structure import RawBlock, build_blocks
+from .structure import RawBlock, build_blocks, document_title, is_signature
 from .text import CleanStats, compound_pairs, numbering_info
 
+INVISIBLE = str.maketrans("", "", "\ufeff\u200b\u200c\u200d\u2060")
 BULLET = "• "
 HEADING_STYLE_ID = re.compile(r"Heading(\d)")
 HEADING_STYLE_NAME = re.compile(r"(?:heading|заголовок|sarlavha|сарлавҳа)\s*(\d)", re.IGNORECASE)
+MC_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
 RENDERED_BREAK = "w:lastRenderedPageBreak"
 EXPLICIT_BREAK = 'w:br[@w:type="page"]'
 
@@ -41,27 +44,32 @@ def parse_docx(path: str | Path) -> Document:
     for child in docx.element.body.iterchildren():
         if child.tag == qn("w:p"):
             paragraph = Paragraph(child, docx)
-            raw, extra = _paragraph_block(paragraph, page, styles, numbering)
-            raw_blocks.append(raw)
-            extras[id(raw)] = extra
+            # The paragraph, then the text boxes anchored in it (shapes with text).
+            for part in [paragraph, *_text_box_paragraphs(child, docx)]:
+                raw, extra = _paragraph_block(part, page, styles, numbering)
+                raw_blocks.append(raw)
+                extras[id(raw)] = extra
             page += len(paragraph._p.xpath(f".//{break_xpath}"))
         elif child.tag == qn("w:tbl"):
             raw_blocks.append(_table_block(Table(child, docx), page))
     _mark_spacing(raw_blocks, extras)
     _mark_bold_subheadings(raw_blocks, extras)
-    title = docx.core_properties.title or _leading_title(raw_blocks, extras)
+    # The title the document shows comes first: Word's property is often a leftover
+    # ("Untitled", an older file's name).
+    title = _leading_title(raw_blocks, extras) or _property_title(docx.core_properties.title)
 
     last_page = max(page, 1)
     pages = [Page(number=number) for number in range(1, last_page + 1)]
     properties = docx.core_properties
     stats = CleanStats()
     compounds = compound_pairs(raw.text for raw in raw_blocks)
+    blocks = build_blocks(raw_blocks, compounds=compounds, stats=stats, page_layout=False)
     return assemble_document(
         path,
         "docx",
         pages,
-        build_blocks(raw_blocks, compounds=compounds, stats=stats, page_layout=False),
-        title=title or None,
+        blocks,
+        title=title or document_title(blocks),
         author=properties.author,
         extra={"pages_approximate": True, **stats.as_dict()},
     )
@@ -286,7 +294,7 @@ def _paragraph_block(
     numbered = num is not None and num[0] != "0"
     list_item = level is None and (numbered or style.list_style)
     size, bold = _font_stats(paragraph, style)
-    text = paragraph.text
+    text = paragraph.text.translate(INVISIBLE)  # a byte-order mark is no text
     marker = numbering.label(*num) if numbered and num is not None and text.strip() else None
     if list_item and text.strip():
         text = f"{marker} {text}" if marker else f"{BULLET}{text}"
@@ -361,16 +369,22 @@ def _mark_bold_subheadings(blocks: list[RawBlock], extras: dict[int, _Extra]) ->
             following.rows is not None or following.list_item or following.bold < config.BOLD_SHARE
         )
         styled = bold or (keep_next and raw.bold >= config.BOLD_SHARE)
-        if styled and short and text[-1] != "." and plain_after:
-            raw.heading_source = "subheading"
+        # A bold line ending with ":" introduces what follows; a signature closes the act.
+        lead_in = text[-1] == ":"
+        if styled and short and text[-1] != "." and not lead_in and not is_signature(text):
+            if plain_after:
+                raw.heading_source = "subheading"
 
 
 def _leading_title(blocks: list[RawBlock], extras: dict[int, _Extra]) -> str:
     """The centred bold (or larger) lines opening the document before its first heading: the
-    document's title when Word's title property is empty. They become ``title_page``."""
+    document's title when Word's title property is empty. Short centred lines in plain type
+    may come first (the issuer and the kind of act: "OʻZBEKISTON RESPUBLIKASI PREZIDENTINING"
+    / "FARMONI"). All of them become ``title_page``; the title is the prominent lines."""
     sizes = sorted(raw.font_size for raw in blocks if raw.font_size and raw.text.strip())
     body = sizes[len(sizes) // 2] if sizes else 0.0
-    lines: list[str] = []
+    header: list[RawBlock] = []
+    title: list[RawBlock] = []
     for raw in blocks:
         if not raw.text.strip():
             continue
@@ -378,19 +392,32 @@ def _leading_title(blocks: list[RawBlock], extras: dict[int, _Extra]) -> str:
         centred = extras.get(id(raw), NO_EXTRA).centred
         larger = body and raw.font_size and raw.font_size > body
         styled_heading = raw.heading_level is not None and raw.heading_source != "subheading"
-        if styled_heading or numbering_info(text) or raw.list_item:
+        if styled_heading or numbering_info(text) or raw.list_item or not centred:
             break
-        if not centred or not (raw.bold >= config.BOLD_SHARE or larger):
+        if not (raw.bold >= config.BOLD_SHARE or larger):
+            if title or len(text.split()) > config.DOCX_ISSUER_LINE_WORDS:
+                break
+            header.append(raw)
+            continue
+        # "UMUMIY QISM" in capitals after a title in small letters is a heading of its own.
+        if title and _capitals(text) != _capitals(title[0].text):
             break
-        if lines and _capitals(text) != _capitals(lines[0]):  # "UMUMIY QISM" after the title
-            break
-        lines.append(text)
-    if not lines:
+        title.append(raw)
+    if not title:
         return ""
-    for raw in [b for b in blocks if b.text.strip()][: len(lines)]:
+    for raw in header + title:
         raw.role = "title_page"
         raw.heading_source = None
-    return " ".join(lines)
+    return " ".join(" ".join(raw.text.split()) for raw in title)
+
+
+def _property_title(title: str | None) -> str:
+    """Word's title property, unless it is a placeholder ("Untitled", "Microsoft Word - ...")."""
+    title = " ".join((title or "").split())
+    folded = title.casefold()
+    if folded in config.PLACEHOLDER_TITLES or folded.startswith("microsoft word - "):
+        return ""
+    return title
 
 
 def _capitals(text: str) -> bool:
@@ -398,14 +425,29 @@ def _capitals(text: str) -> bool:
     return bool(letters) and sum(c.isupper() for c in letters) >= 0.8 * len(letters)
 
 
+def _text_box_paragraphs(element: Any, docx: Any) -> list[Paragraph]:
+    """Paragraphs written in text boxes (shapes) inside ``element``; python-docx reads only a
+    paragraph's own runs. A box is stored twice (a drawing and an older VML fallback): only
+    the drawing is read."""
+    paragraphs: list[Paragraph] = []
+    for box in element.iter(qn("w:txbxContent")):
+        if any(ancestor.tag == MC_FALLBACK for ancestor in box.iterancestors()):
+            continue
+        paragraphs.extend(Paragraph(p, docx) for p in box.iterchildren(qn("w:p")))
+    return paragraphs
+
+
 def _table_block(table: Table, page: int) -> RawBlock:
+    """The table's rows. A cell merged across columns is read once; a cell merged down over
+    rows keeps its text in its first row only (python-docx repeats it in every row it
+    covers), so a merged header or label does not repeat as rows of its own."""
     rows: list[list[str]] = []
     for row in table.rows:
         cells: list[str] = []
         previous = None
         for cell in row.cells:
             if cell._tc is not previous:
-                cells.append(cell.text)
+                cells.append(cell.text if cell._tc.getparent() is row._tr else "")
             previous = cell._tc
         rows.append(cells)
     return RawBlock(text="", page=page, rows=rows)

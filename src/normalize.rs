@@ -17,6 +17,7 @@ use unicode_normalization::{is_nfc, UnicodeNormalization};
 use crate::chars::is_apostrophe;
 use crate::confusables::fix_mixed_words;
 use crate::lexicon::is_known;
+use crate::numbering::GLYPH_BULLETS;
 use crate::symbols::{self, SymbolFont};
 
 /// Canonical Uzbek Latin modifier letters (Unicode recommendation).
@@ -24,8 +25,6 @@ const TURNED_COMMA: char = '\u{02BB}'; // ʻ  in oʻ, gʻ
 const APOSTROPHE: char = '\u{02BC}'; // ʼ  tutuq belgisi, e.g. maʼlumot
 const ELLIPSIS: char = '\u{2026}';
 const MIN_LEADER_DOTS: usize = 4;
-
-const BULLET: char = '•';
 
 /// What normalization changed, for document metadata.
 #[derive(Default, Debug, PartialEq)]
@@ -235,9 +234,10 @@ pub fn normalize_with_stats(text: &str) -> (String, Stats) {
         match chars[i] {
             ' ' => writer.space(),
             '\n' => writer.newline(),
-            BULLET => {
-                writer.push(BULLET);
-                if chars.get(i + 1).is_some_and(|c| !c.is_whitespace()) {
+            c if GLYPH_BULLETS.contains(&c) => {
+                // "■Always" -> "■ Always": a bullet glued to its item's text.
+                writer.push(c);
+                if chars.get(i + 1).is_some_and(|c| c.is_alphanumeric()) {
                     writer.space();
                 }
             }
@@ -322,6 +322,8 @@ mod tests {
         );
         assert_eq!(normalize_text("a \u{F03D} b \u{F03E} c"), "a = b > c");
         assert_eq!(normalize_text("\u{F02D} band"), "• band");
+        assert_eq!(normalize_text("■Always put"), "■ Always put");
+        assert_eq!(normalize_text("•Item and • item"), "• Item and • item");
     }
 
     #[test]

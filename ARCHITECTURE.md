@@ -65,7 +65,10 @@ PDF ─► structure tree that passes the checks? ── yes ─► tagged route
    (Adobe Symbol / Wingdings tables, by font name), look-alike letters from the other
    alphabet (UTS #39 confusables, per word), apostrophes, spaces. No private-use character
    survives.
-2. Reading order (`columns.py`): columns are cut at gutters; when no gutter runs through
+2. Reading order (`columns.py`): justified lines that the PDF stores word by word are
+   rebuilt into lines first (`paragraphs.rejoin_spread_rows`), against the left edge of the
+   main text size, so a stretched row is never taken for narrow columns; a column needs
+   several rows. Columns are cut at gutters; when no gutter runs through
    the whole page, the page is first cut into bands at blank gaps and full-width lines and
    each band is cut on its own (XY-cut with the banding and pre-masking of XY-Cut++). A
    single-column page keeps its order. Tables: PyMuPDF's ruling-line strategy on pages
@@ -80,10 +83,16 @@ PDF ─► structure tree that passes the checks? ── yes ─► tagged route
    (`role="figure"`); line shading and shaded text areas are not figures, and a paragraph's
    short last line is never a label. A short line ending with ";" closes an enumeration
    item; a line that broke because the next word did not fit runs on even before a capital.
+   Lines centred on one axis (left and right ends both differing) form one block until a
+   sentence ends: multi-line titles and appendix stamps. Images inside the running text
+   (text above and below, under 30% of the page) become `[image]` blocks with
+   `role="image"` at their place, so a formula set as a picture does not vanish silently.
 4. Hyphen rejoining with the document's own compounds kept (`Hyphenator`).
 5. Page furniture (`layout.py`): page numbers (also "- 7 -", "[7]", Roman ones) and margin
-   text repeated on half of the pages, on most even or odd pages, or on three consecutive
-   pages at the same height and size (running chapter titles); footnotes, title page,
+   text repeated on half of the pages, on most even or odd pages, or on three pages at most
+   two apart at the same height and size (running chapter titles, also a book's left- and
+   right-hand ones); a single header line at the place of such running titles is one too (a
+   short section's); footnotes, title page,
    contents (by shape; several per book, with their title line) and back matter; then
    formula and chart fragments are grouped into `role="formula"` blocks.
 6. Style profile (`profile.py`): one pass over the document groups blocks by look (font
@@ -101,7 +110,12 @@ PDF ─► structure tree that passes the checks? ── yes ─► tagged route
    count as a heading signal, and on pages flagged `columns` an XY-cut of its text regions
    gives the reading order. Those pages are rebuilt and rated again. The model loads once
    per process (about 50 MB with ONNX Runtime).
-8. Headings and levels (`structure.py`): bookmarks, then the contents page, then numbering,
+8. Before structure detection, blocks of one or two punctuation marks only (a "."
+   spacer paragraph) are dropped and counted (`layout_artifacts_removed`). Tables cut by a
+   page break are joined when the part on the next page opens it with the same columns at
+   the same place: a repeated header is dropped and a cell fragment left between the parts
+   goes back into its row; a last row holding only a page number is not table content.
+   Headings and levels (`structure.py`): bookmarks, then the contents page, then numbering,
    then style. With a style profile a heading needs a heading style and a second signal
    (numbering, bookmarks or contents, space above and space or body text below, or a
    layout-model title); a short heading-style line may end with a full stop ("Валюта
@@ -114,14 +128,34 @@ PDF ─► structure tree that passes the checks? ── yes ─► tagged route
    Vetoes: outline entries (a plan whose numbered titles return later as headings),
    formulas, captions above a table, figure or formula (`role="caption"`), text inside a
    table frame or a labelled drawing, run-in titles whose sentence runs on, ":" labels.
-   Recurring heading text gets one decision. Levels are decided once per document:
+   Recurring heading text gets one decision. Also no headings: signatures (a position and
+   the signer's initials and surname in capitals), labels of a diagram (a short line between
+   other short labels), text that reads like a list item or paragraph even when tags or
+   styles call it a heading. A tagged PDF whose heading tags fail those checks often keeps
+   its paragraphs, lists and tables from the tags but gets its headings from the rules. A
+   stamp ending with an appendix label ("…qaroriga" / "1-ILOVA") gives the label as its own
+   heading followed by the stamp (also when the stamp's lines are separate blocks opening the
+   page), and a bare heading word ("ILOVA") counts as one; a title right under a label sits
+   below it. Approval stamps ("УТВЕРЖДЕНА", "TASDIQLANGAN") are no headings. Plain lines
+   numbered I., II., III. in a row with text between them are chapters even without styling
+   (documents converted from scans). A section typed as a list item ("4.3. …" with Word numbering) or in another size
+   still counts when it continues an accepted numbering sequence; sequences may miss one
+   member. Unnumbered headings opening page 1 before any text are the document's title
+   (`metadata.title`); with styled headings (DOCX, tagged PDF) they must be siblings or use a
+   level that does not come back. A short heading above a contents list belongs to it, and recurring
+   unnumbered headings that look like the numbered sections ("Review questions") take their
+   level. Levels are decided once per document:
    bookmarks, then numbering, then style rank. An unnumbered heading takes the level of the
    numbered headings it looks like; a style less prominent than a numbered heading style
    sits below it; else it sits inside the chapter; chapter words that never nest share a
    level; "1., 2." restarting inside "N.M" nest under it; a child never sits above its
-   parent; levels are dense. Wrapped titles are joined.
+   parent; levels are dense. Section numbers overrule heading styles that contradict them
+   ("2." and "3." at different outline levels): then "N." is one level, "N.M." the next. A
+   bold DOCX line that looks like an outline-level title is its sibling. Wrapped titles are
+   joined.
 9. Language per block, short blocks borrow their neighbours'; document language weighted by
-   length.
+   length, and `unknown` when most of the written text is in no known language (an English
+   book with a few Uzbek-looking lines).
 10. Chunking.
 
 Every tunable threshold and word list lives in `config.py`.
@@ -160,13 +194,39 @@ role). `build_blocks` turns them into typed blocks:
   markers ("1.", "a)", "•" from `numbering.xml`), tables from the table XML. A short paragraph
   set entirely in bold (or kept with the next) and followed by plain text is a subheading one
   level below the numbered heading before it; extra space above marks a paragraph as set
-  apart. Leading centred bold lines are the title when Word's title property is empty.
+  apart. Leading centred bold lines are the title; Word's title property is used without
+  them, unless it is a placeholder ("Untitled"). A cell merged down over rows is read once.
   Unstyled paragraphs fall back to the same heuristics as PDF. Pages are approximate.
 
 ## Chunking (`chunking.py`)
 
-Input is only the `Document`. Every heading starts a new chunk; inside a section whole
-blocks are packed up to `max_tokens`. Oversized blocks are split by sentences (lines for
+Tables are cut between rows only: their header rows (detected from short label cells, a
+caption or unit line above them, and cells merged across or down) start every chunk that
+goes on with the table, and overlap never repeats table rows. Each chunk's `metadata` says
+what it holds (`content_type`, `content_types`, the `tables` rows with their header,
+`is_appendix`, `source_title`, `footnotes`) and where its language comes from: a chunk whose
+text alone gives no language (a table of chemical names) takes the document's when it is
+written in the document's script (`language_source = "document"`).
+
+## Quality warnings (`assemble.py`)
+
+`metadata.extra["quality"]["warnings"]` lists what the parser knows it read badly: pages
+without a text layer, low-confidence pages, pictures not read, an unknown language, too
+little text.
+
+## Evaluation (`tools/evaluate.py`)
+
+Parses a folder of real documents and measures text fidelity, reading order (adjacent word
+pairs that are near each other in the source stream), heading precision and recall and
+heading-path accuracy against hand-made outlines (`--gold DIR`), tables found, tiny and
+heading-only chunks, table rows repeated by overlap, chunks without a language, artifacts,
+time and memory; `--compare` shows the change between two runs.
+
+## Chunking details
+
+Input is only the `Document`. Every heading starts a new chunk, except that a short text
+under a heading (under `MIN_CHUNK_TOKENS`, such as an appendix stamp) stays with the first
+subsection and takes its path; inside a section whole blocks are packed up to `max_tokens`. Oversized blocks are split by sentences (lines for
 lists/tables, words as a last resort). Overlap repeats trailing sentences of the previous
 chunk within the same section only, and never opens with list items cut off from their
 lead-in. A lead-in line ending with ":" moves to the chunk with what it introduces. Blocks
