@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (2026-10-03)
+## 0.1.0 (2026-10-04)
 
 First public alpha release.
 
@@ -13,12 +13,30 @@ normalization, hyphenation repair, language detection, numbering and sentence sp
 because PyMuPDF is AGPL-3.0; `import uzru_parser` and DOCX parsing work without it. One abi3
 wheel per platform covers CPython 3.10 and newer. Unreadable files raise `DocumentError`.
 
-**Limitations:** no OCR (scanned pages get `needs_ocr`); complex multi-column PDF layouts
-are not handled; DOCX page numbers are approximate; English is labelled `unknown`; formulas
-and charts become `formula` / `figure` blocks; PDF parsing in threads is serialised.
+**PDF structure:** tagged PDFs are read from their structure tags (`pdf_route = "tagged"`);
+other PDFs get a style profile of the whole document, headings that need a heading style and
+a second signal (or a numbered heading word such as "1-ILOVA"), XY-cut reading order for
+columns, ruled and unruled tables scored against each other, and a confidence score per page.
+An optional layout model (PP-DocLayout-S through ONNX Runtime, the `layout` extra, off by
+default) corrects low-confidence pages.
+
+**Limitations:** no OCR (scanned pages get `needs_ocr`); titles broken across two columns or
+pages may be split; DOCX page numbers are approximate; English is labelled `unknown`;
+formulas and charts become `formula` / `figure` blocks; PDF parsing in threads is serialised.
 
 ### Changes in detail
 
+- PDF: tagged route (headings, lists, tables with merged cells, notes from the structure tree;
+  page headers caught inside a tagged paragraph are dropped); metadata `pdf_route`,
+  `pdf_tags`, `styles`; page `extra` with `confidence` and `issues`.
+- PDF headings: heading styles may be followed by another heading style; titles wrapped over
+  several lines or blocks are one heading; numbered articles may wrap over six lines; inserted
+  articles ("10¹-modda") and parts numbered in words ("BIRINCHI BOʻLIM", "ЧАСТЬ ПЕРВАЯ").
+- PDF paragraphs: short lines ending with ";" close an enumeration item; a sentence left open
+  at a page end goes on before a capital; ragged lines broken before a long word run on.
+- PDF tables: only thin bars and stroked paths count as table rules (browser line
+  backgrounds made fake tables), and ruled tables are only searched for when the page has
+  rules both ways (faster pages without tables).
 - Rust core: Unicode normalization (Uzbek apostrophes), PDF hyphenation repair, language/script detection.
 - Python: `Document` model, PyMuPDF-based PDF parser, `Parser` / `parse` API.
 - Structure detection: headings (numbering, font size, bold, capitals) and lists.

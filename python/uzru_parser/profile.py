@@ -7,7 +7,8 @@ capitals) and finds what the look is used for:
 * the body style: the look holding the most characters;
 * heading styles: looks more prominent than the body (bigger, or bold, italic or in capitals
   at about body size), used rarely, for short blocks that stand alone and are followed by
-  body text. They are ranked by size, then weight, then frequency (rarer is higher);
+  body text or by a heading of another style. They are ranked by size, then weight, then
+  frequency (rarer is higher);
 * the footnote style: smaller than the body and mostly at the foot of the page.
 
 Decisions are made once per document, so a heading style keeps one rank on every page.
@@ -49,7 +50,7 @@ class _Use:
     blocks: int = 0
     chars: int = 0
     short: int = 0  # blocks a heading could be: few lines, few characters
-    before_body: int = 0  # blocks followed by a body block
+    before_body: int = 0  # blocks followed by a body block or another heading style
     bottom: int = 0  # blocks in the footnote zone of the page
     pages: set[int] = field(default_factory=set)
 
@@ -97,10 +98,12 @@ def _flow(raw: RawBlock) -> bool:
     return raw.rows is None and raw.role is None and bool(raw.text.strip())
 
 
-def _short(raw: RawBlock) -> bool:
-    flat = " ".join(raw.text.split())
-    lines = raw.text.count("\n") + 1
-    return lines <= config.MAX_HEADING_LINES and len(flat) <= config.MAX_KEYWORD_HEADING_CHARS
+def _short(run: Sequence[RawBlock]) -> bool:
+    """A run of blocks short enough to be one heading (a title wrapped over a few lines,
+    maybe split into blocks)."""
+    chars = sum(len(" ".join(raw.text.split())) for raw in run)
+    lines = sum(raw.text.count("\n") + 1 for raw in run)
+    return lines <= config.PROFILE_HEADING_MAX_LINES and chars <= config.MAX_KEYWORD_HEADING_CHARS
 
 
 def _prominent(style: Style, body: Style) -> bool:
@@ -129,32 +132,50 @@ def build_profile(blocks: Sequence[RawBlock], page_heights: dict[int, float]) ->
     body = chars.most_common(1)[0][0]
     total = sum(chars.values())
 
+    # Consecutive blocks of one style count as one use: a title wrapped into two blocks is
+    # one heading, followed by what comes after it.
+    grouped: list[tuple[Style | None, list[RawBlock]]] = []
+    for raw, style in zip(flow, styles, strict=True):
+        if style is not None and grouped and grouped[-1][0] == style:
+            grouped[-1][1].append(raw)
+        else:
+            grouped.append((style, [raw]))
+    runs = [(style, run) for style, run in grouped if style is not None]
+
     uses: dict[Style, _Use] = {}
-    for index, (raw, style) in enumerate(zip(flow, styles, strict=True)):
-        if style is None:
-            continue
+    for style, run in runs:
         use = uses.setdefault(style, _Use())
         use.blocks += 1
-        use.chars += len(raw.text)
-        use.pages.add(raw.page)
-        use.short += _short(raw)
-        following = styles[index + 1] if index + 1 < len(styles) else None
-        use.before_body += following == body
-        height = page_heights.get(raw.page, 0.0)
-        if raw.bbox and height and raw.bbox[1] >= height * config.FOOTNOTE_ZONE:
-            use.bottom += 1
+        use.chars += sum(len(raw.text) for raw in run)
+        use.short += _short(run)
+        for raw in run:
+            use.pages.add(raw.page)
+            height = page_heights.get(raw.page, 0.0)
+            if raw.bbox and height and raw.bbox[1] >= height * config.FOOTNOTE_ZONE:
+                use.bottom += 1
 
-    headings = [
+    candidates = {
         style
         for style, use in uses.items()
         if style != body
         and _prominent(style, body)
         and use.chars <= config.PROFILE_HEADING_MAX_SHARE * total
         and use.short >= config.PROFILE_HEADING_SHORT_SHARE * use.blocks
-        and use.before_body >= config.PROFILE_HEADING_BEFORE_BODY * use.blocks
         and (use.blocks >= config.PROFILE_MIN_EMPHASIS_BLOCKS or style.size > body.size)
+    }
+    # A heading leads into body text or into a heading of another style (a chapter title
+    # followed by its first section title).
+    for (style, _), (following, _) in zip(runs, runs[1:], strict=False):
+        if style in candidates and (following == body or following in candidates):
+            uses[style].before_body += 1
+    headings = [
+        style
+        for style in candidates
+        if uses[style].before_body >= config.PROFILE_HEADING_BEFORE_BODY * uses[style].blocks
     ]
     # Bigger first, then bold, capitals, italic, then the rarer style.
+    if sum(uses[style].blocks for style in headings) < config.PROFILE_MIN_HEADINGS:
+        headings = []  # a lone title says nothing about the document's headings
     headings.sort(
         key=lambda s: (-s.size, not s.bold, not s.caps, not s.italic, uses[s].blocks, s.font)
     )

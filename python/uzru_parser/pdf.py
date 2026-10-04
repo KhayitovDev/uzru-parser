@@ -535,7 +535,7 @@ def _read_page(
     page: pymupdf.Page, number: int, detect_tables: bool, stats: CleanStats
 ) -> _PageContent:
     drawings = page.get_cdrawings()  # type: ignore[no-untyped-call]
-    tables = _find_tables(page, number, len(drawings)) if detect_tables else []
+    tables = _find_tables(page, number, _rulings(drawings)) if detect_tables else []
     page_dict = page.get_text("dict", sort=True)  # type: ignore[no-untyped-call]
     lines: list[Line] = []
     images: list[BBox] = []
@@ -722,9 +722,27 @@ def _is_table(rows: list[list[str]]) -> bool:
     return not pairs or running < config.RUNNING_TEXT_ROWS * len(pairs)
 
 
-def _find_tables(page: pymupdf.Page, number: int, drawings: int) -> list[RawBlock]:
-    """Ruled tables (PyMuPDF's "lines" strategy), on pages with enough vector paths."""
-    if drawings < config.MIN_RULING_PATHS:
+def _rulings(drawings: list[dict[str, Any]]) -> int:
+    """How many rules a table could be drawn with: the smaller of the horizontal and the
+    vertical count (a grid needs both; underlines and fraction bars are only horizontal).
+    Rules are thin filled bars and the sides of stroked paths; filled boxes behind text
+    (highlighted lines, shaded areas) are not rules."""
+    across = down = 0
+    for drawing in drawings:
+        x0, y0, x1, y1 = drawing["rect"]
+        width, height = x1 - x0, y1 - y0
+        if "s" in drawing.get("type", "") and min(width, height) > config.RULE_THICKNESS:
+            across, down = across + 2, down + 2  # a stroked box: two sides each way
+        elif height <= config.RULE_THICKNESS < width:
+            across += 1
+        elif width <= config.RULE_THICKNESS < height:
+            down += 1
+    return min(across, down)
+
+
+def _find_tables(page: pymupdf.Page, number: int, rulings: int) -> list[RawBlock]:
+    """Ruled tables (PyMuPDF's "lines" strategy), on pages with enough table rules."""
+    if rulings < config.MIN_RULING_PATHS:
         return []
     return _tables_from(page.find_tables().tables, number)  # type: ignore[no-untyped-call]
 

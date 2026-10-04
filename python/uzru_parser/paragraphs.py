@@ -438,11 +438,29 @@ def _continues(paragraph: list[Line], line: Line, stats: LayoutStats, page_right
         _ends_sentence(last.text) or not _starts_lowercase(line.text)
     )
     short_last = last.bbox[2] < page_right - config.PARAGRAPH_SHORT_LINE * size
-    if short_last and sentence_break:
+    if (
+        short_last
+        and not _ends_sentence(last.text)
+        and _next_word_did_not_fit(last, line, page_right)
+    ):
+        short_last = False  # ragged text: the line broke because the next word was too long
+    # A short line ending with ";" closes an item of an enumeration ("narxlarning;").
+    item_end = not open_after and last.text.rstrip().endswith(";")
+    if short_last and (sentence_break or item_end):
         return False
     # Producers that write whole paragraphs as blocks: a new block is a new paragraph
     # unless the sentence visibly runs on.
     return stats.line_blocks or line.block == last.block or not sentence_break
+
+
+def _next_word_did_not_fit(last: Line, line: Line, page_right: float) -> bool:
+    """The first word of ``line`` (and a space) is wider than the room left at the end of
+    ``last``: the line was full for that word."""
+    words = line.text.split()
+    if not words or not last.text:
+        return False
+    char_width = (last.bbox[2] - last.bbox[0]) / max(1, len(last.text))
+    return char_width * (len(words[0]) + 1) > page_right - last.bbox[2]
 
 
 def _left_edge(lines: list[Line], body_size: float) -> float:

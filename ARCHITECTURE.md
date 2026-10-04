@@ -69,7 +69,7 @@ PDF ─► structure tree that passes the checks? ── yes ─► tagged route
    the whole page, the page is first cut into bands at blank gaps and full-width lines and
    each band is cut on its own (XY-cut with the banding and pre-masking of XY-Cut++). A
    single-column page keeps its order. Tables: PyMuPDF's ruling-line strategy on pages
-   with vector paths, and its text strategy where rows of aligned cells suggest an unruled
+   with table rules, and its text strategy where rows of aligned cells suggest an unruled
    table or a ruled table scores poorly; the better-scoring reading wins (`tables.py`:
    consistent columns, few empty cells, no words cut between cells). Merged cells keep
    their span (`extra["spans"]`) and a cell merged down repeats its text in each row.
@@ -78,7 +78,8 @@ PDF ─► structure tree that passes the checks? ── yes ─► tagged route
    justified lines stored word by word are rejoined, inline formula pieces stay in their
    sentence, lone list markers join their text. Figure labels are grouped
    (`role="figure"`); line shading and shaded text areas are not figures, and a paragraph's
-   short last line is never a label.
+   short last line is never a label. A short line ending with ";" closes an enumeration
+   item; a line that broke because the next word did not fit runs on even before a capital.
 4. Hyphen rejoining with the document's own compounds kept (`Hyphenator`).
 5. Page furniture (`layout.py`): page numbers (also "- 7 -", "[7]", Roman ones) and margin
    text repeated on half of the pages, on most even or odd pages, or on three consecutive
@@ -87,8 +88,9 @@ PDF ─► structure tree that passes the checks? ── yes ─► tagged route
    formula and chart fragments are grouped into `role="formula"` blocks.
 6. Style profile (`profile.py`): one pass over the document groups blocks by look (font
    family, size, bold, italic, capitals). The body style holds the most text; heading
-   styles are more prominent, rare, mostly short and followed by body text, ranked by
-   size, weight and rarity. Page confidence (`confidence.py`): 1 minus the worst of five
+   styles are more prominent, rare, mostly short and followed by body text or a heading of
+   another style (consecutive blocks of one style, a wrapped title, count once), ranked by
+   size, weight and rarity; a lone title makes no profile. Page confidence (`confidence.py`): 1 minus the worst of five
    checks (columns read as one, poor tables, prominent blocks outside the heading styles,
    mostly very short lines, a broken text layer), with the failing checks as `issues` in
    `page.extra`.
@@ -103,7 +105,9 @@ PDF ─► structure tree that passes the checks? ── yes ─► tagged route
    then style. With a style profile a heading needs a heading style and a second signal
    (numbering, bookmarks or contents, space above and space or body text below, or a
    layout-model title); a short heading-style line may end with a full stop ("Валюта
-   бозори."). Without heading styles (and for DOCX) two signals of numbering, bigger font,
+   бозори."). Outside the heading styles a line still qualifies with the two signals below
+   plus a numbered heading word ("1-ILOVA") or space around it (a title wrapped into several
+   blocks counts as one). Without heading styles (and for DOCX) two signals of numbering, bigger font,
    bold, capitals and space above are needed. Real words are required (an unnumbered heading
    a word of 4+ letters); a plain "N." item is a list item unless it belongs to a heading
    sequence.
@@ -143,8 +147,8 @@ role). `build_blocks` turns them into typed blocks:
 
 * **PDF** (`pdf.py`): text blocks with font size, family, bold and italic share from
   PyMuPDF; the tagged route when the structure tags pass their checks. Ruled tables come
-  from `find_tables()`, which only runs on pages with at least four vector paths because it
-  is expensive (the text strategy only where aligned rows suggest a table); a table grows
+  from `find_tables()`, which only runs on pages with table rules both ways (thin bars or
+  stroked paths; filled boxes behind text lines are no rules) because it is expensive (the text strategy only where aligned rows suggest a table); a table grows
   over the merged rows its own ruling closes. Text inside a
   table is not repeated as paragraphs. PyMuPDF is not thread-safe, so one document is read
   at a time under a lock (threads are safe but serialised; processes run in parallel). The

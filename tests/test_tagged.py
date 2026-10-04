@@ -173,6 +173,33 @@ def test_a_paragraph_going_on_on_the_next_page_is_one_block(tmp_path: Path) -> N
 
 
 @needs_structure
+def test_page_furniture_drawn_inside_a_paragraph_going_on_is_dropped(tmp_path: Path) -> None:
+    """A running header and page number drawn after a paragraph that goes on to the next page
+    land inside it (MuPDF keeps the element open); they stand apart in the margin band, so
+    they are dropped even though the paragraph's next lines start close to the top."""
+    first = paragraph(0, 740, BODY[:2])
+    rest = [Text(BODY[2], page=1, y=78)]
+    root = [
+        Tag("P", paragraph(0, 80)),
+        Tag("P", [*first, *rest]),
+        Tag("P", paragraph(1, 100)),
+        Tag("P", paragraph(1, 760)),
+    ]
+    extra = [
+        piece
+        for page in (0, 1)
+        for piece in (
+            Artifact("Qonun hujjatlari to‘plami", page=page, y=40, size=9),
+            Artifact(str(page + 1), page=page, y=810, size=9),
+        )
+    ]
+    blocks = parse(write_tagged_pdf(tmp_path / "furniture.pdf", root, extra=extra)).blocks
+    texts = [b.text for b in blocks if b.type is BlockType.PARAGRAPH]
+    assert texts[1] == " ".join(BODY).replace("‘", "ʻ").replace("’", "ʼ")
+    assert not any("plami" in text for text in texts)
+
+
+@needs_structure
 def test_contents_entries_are_left_out_of_chunks(tmp_path: Path) -> None:
     root = [
         Tag(

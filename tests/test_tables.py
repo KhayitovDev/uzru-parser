@@ -5,6 +5,7 @@ from pathlib import Path
 import pymupdf
 from helpers import bold_font, cyrillic_font
 from uzru_parser import BlockType, parse
+from uzru_parser.pdf import _rulings
 from uzru_parser.tables import table_score
 
 ROWS = [
@@ -131,3 +132,14 @@ def test_scores_prefer_consistent_grids() -> None:
     assert table_score(with_gaps) < table_score(clean)
     assert table_score(cut) < table_score([["Jami daromad (birlashgan)", "500"], ["Kredit", "10"]])
     assert table_score([]) == -1.0
+
+
+def test_only_thin_bars_and_stroked_paths_count_as_table_rules() -> None:
+    """Boxes behind highlighted lines are no table rules; a grid needs rules both ways."""
+    highlight = [{"type": "f", "rect": (80, 100 + 20 * i, 550, 116 + 20 * i)} for i in range(8)]
+    underlines = [{"type": "f", "rect": (80, 120 + 20 * i, 300, 121 + 20 * i)} for i in range(6)]
+    grid = [{"type": "s", "rect": (80, 100 + 20 * i, 500, 100 + 20 * i)} for i in range(4)]
+    grid += [{"type": "s", "rect": (80 + 140 * i, 100, 80 + 140 * i, 160)} for i in range(4)]
+    assert _rulings(highlight) == 0
+    assert _rulings(underlines) == 0
+    assert _rulings(grid) == 4

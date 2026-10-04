@@ -62,7 +62,29 @@ fn is_roman(c: char) -> bool {
     matches!(c, 'I' | 'V' | 'X' | 'L' | 'C' | '\u{0406}' | '\u{0425}')
 }
 
-/// Keyword followed by a number: "Статья 5", "Приложение № 1", "РАЗДЕЛ II".
+/// Uzbek ordinal numbers end in "-inchi"/"-nchi": "birinchi", "ikkinchi", "uchinchi".
+fn is_uzbek_ordinal(word: &str) -> bool {
+    word.chars().count() >= 5 && ["nchi", "нчи"].iter().any(|end| word.ends_with(end))
+}
+
+/// Russian ordinal numbers: "первый", "вторая", "третий", ... "десятый".
+fn is_russian_ordinal(word: &str) -> bool {
+    const STEMS: &[&str] = &[
+        "перв",
+        "втор",
+        "трет",
+        "четв",
+        "пят",
+        "шест",
+        "седьм",
+        "восьм",
+        "девят",
+        "десят",
+    ];
+    STEMS.iter().any(|stem| word.starts_with(stem))
+}
+
+/// Keyword followed by a number: "Статья 5", "Приложение № 1", "РАЗДЕЛ II", "ЧАСТЬ ПЕРВАЯ".
 fn keyword_first(text: &str) -> Option<usize> {
     if let Some(rest) = text.strip_prefix(PARAGRAPH_SIGN) {
         let next = rest.trim_start().chars().next()?;
@@ -81,20 +103,33 @@ fn keyword_first(text: &str) -> Option<usize> {
         .trim_start()
         .chars()
         .next()?;
-    (next.is_ascii_digit() || is_roman(next)).then_some(depth)
+    let ordinal = is_russian_ordinal(&leading_word(rest).0);
+    (next.is_ascii_digit() || is_roman(next) || ordinal).then_some(depth)
 }
 
-/// Number followed by a keyword, the Uzbek order: "1-modda", "12-bob", "I BOʻLIM", "II-BOB".
+/// Superscript digits number inserted articles: "10¹-modda" comes between 10 and 11.
+fn is_superscript_digit(c: char) -> bool {
+    matches!(c, '¹' | '²' | '³' | '\u{2070}' | '\u{2074}'..='\u{2079}')
+}
+
+/// Number followed by a keyword, the Uzbek order: "1-modda", "12-bob", "10¹-modda",
+/// "I BOʻLIM", "II-BOB", "BIRINCHI BOʻLIM".
 fn number_first(text: &str) -> Option<usize> {
     let digits = text
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(text.len());
+    let (first_word, after_word) = leading_word(text);
     let rest = if (1..=3).contains(&digits) {
-        let rest = text[digits..].trim_start().strip_prefix('-')?.trim_start();
+        let after = text[digits..].trim_start_matches(is_superscript_digit);
+        let rest = after.trim_start().strip_prefix('-')?.trim_start();
         if rest.starts_with(PARAGRAPH_SIGN) {
             return Some(PARAGRAPH_DEPTH);
         }
         rest
+    } else if is_uzbek_ordinal(&first_word) {
+        // "BIRINCHI BOʻLIM", "Ikkinchi qism"
+        let after = after_word.trim_start();
+        after.strip_prefix('-').unwrap_or(after).trim_start()
     } else {
         let numeral = text.find(|c: char| !is_roman(c)).unwrap_or(text.len());
         let after = &text[numeral..];
@@ -310,6 +345,20 @@ mod tests {
         assert_eq!(info("§ 2. Общие правила"), Some(("keyword", 3)));
         assert_eq!(info("§ без номера"), None);
         assert_eq!(info("12-bob. Asosiy qoidalar"), Some(("keyword", 2)));
+        assert_eq!(info("10¹-modda. Yer uchastkasi"), Some(("keyword", 4)));
+        assert_eq!(info("4²-модда. Тартиб"), Some(("keyword", 4)));
+        assert_eq!(info("10¹ foiz"), None);
+        assert_eq!(
+            info("BIRINChI BOʻLIM. ASOSIY PRINSIPLAR"),
+            Some(("keyword", 1))
+        );
+        assert_eq!(info("Ikkinchi qism"), Some(("keyword", 2)));
+        assert_eq!(info("ИККИНЧИ БЎЛИМ. ИНСОН ҲУҚУҚЛАРИ"), Some(("keyword", 1)));
+        assert_eq!(info("ЧАСТЬ ПЕРВАЯ"), Some(("keyword", 2)));
+        assert_eq!(info("Раздел третий. Обязательства"), Some(("keyword", 1)));
+        assert_eq!(info("Birinchi navbatda bob"), None);
+        assert_eq!(info("Ikkinchi marta"), None);
+        assert_eq!(info("Статья выше"), None);
         assert_eq!(info("3-MAVZU: BANK OPERATSIYALARI"), Some(("keyword", 1)));
         assert_eq!(info("10 - mavzu: Guruhlarda ishlash"), Some(("keyword", 1)));
         assert_eq!(info("4-МАВЗУ: Банк рисклари"), Some(("keyword", 1)));

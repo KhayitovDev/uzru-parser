@@ -99,3 +99,20 @@ def test_chart_labels_in_bold_are_not_headings() -> None:
     blocks.append(raw(BODY, 6, 200))
     texts = [text for kind, _, text in parse(blocks) if kind == "heading"]
     assert "Aktiv" not in texts and "Passiv" not in texts
+
+
+def test_annex_labels_in_the_body_font_and_wrapped_titles_are_headings() -> None:
+    """An annex label set like the body text ("2-ILOVA") is a heading by its numbered heading
+    word; a bold title wrapped into two blocks stands apart from the text as one title, even
+    when bold is also used inside the text."""
+    blocks = [block for page in (1, 2, 3) for block in chapter(page)]
+    blocks += [raw(BODY.replace("\n", " ") * 2, 4, 60 + 40 * i, bold=1.0) for i in range(3)]
+    blocks += [
+        raw("2-ILOVA", 5, 40),
+        raw("Normativ hujjatlarning narx", 5, 80, bold=1.0, spaced=True),
+        raw("MEʼYORLARI", 5, 95, bold=1.0),
+        raw(BODY, 5, 130, spaced=True),
+    ]
+    texts = [text for kind, _, text in parse(blocks) if kind == "heading"]
+    assert "2-ILOVA" in texts
+    assert any(text.startswith("Normativ hujjatlarning narx") for text in texts)
