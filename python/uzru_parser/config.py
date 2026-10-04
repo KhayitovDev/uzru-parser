@@ -70,6 +70,8 @@ LINE_LEVEL_BLOCKS = 0.7
 #: Widest gap, in font sizes, between the pieces of one justified line that the PDF stores as
 #: separate lines because of its wide word spacing.
 SPREAD_LINE_GAP = 8.0
+#: Lines of a centred block have centres within this many alignment tolerances.
+CENTRE_TOLERANCE = 2.0
 #: Font sizes differing by at most this share are the same size (a bold run may report a
 #: slightly different one).
 SAME_SIZE_TOLERANCE = 0.05
@@ -182,6 +184,72 @@ MAX_TITLE_WORDS = 8
 #: Leading characters of two numbered titles compared to tell an outline entry from the
 #: heading it announces.
 OUTLINE_TITLE_CHARS = 40
+#: Plain centred lines of at most this many words before a DOCX title name the issuer and
+#: the kind of act; they belong to the title block.
+DOCX_ISSUER_LINE_WORDS = 8
+#: A document has a language only when at least this share of its written text (blocks
+#: with letters) is in a known one.
+DOCUMENT_LANGUAGE_MIN_SHARE = 0.5
+#: An image inside the running text covers at most this share of the page and is at
+#: least INLINE_PICTURE_MIN_HEIGHT points high (smaller ones are rules and icons).
+INLINE_PICTURE_MAX_SHARE = 0.3
+INLINE_PICTURE_MIN_HEIGHT = 8.0
+#: Words that name an appendix, as the first word of its label ("1-ILOVA").
+APPENDIX_WORDS: tuple[str, ...] = ("ilova", "илова", "приложение", "appendix", "annex")
+#: An appendix stamp written line by line: at most this many words a line and in all.
+STAMP_LINE_WORDS = 8
+STAMP_MAX_WORDS = 40
+#: A file's title property confirmed word by word on the cover has at least these words.
+MIN_COVER_TITLE_WORDS = 3
+#: Title properties that name no document (left by an editor or a template).
+PLACEHOLDER_TITLES: tuple[str, ...] = (
+    "untitled",
+    "document",
+    "документ",
+    "hujjat",
+    "title",
+    "заголовок",
+    "sarlavha",
+)
+#: Plain lines numbered I., II., III. ... in a row (text between them) that make chapter
+#: titles without any styling.
+ROMAN_CHAPTERS_MIN = 3
+#: Words of an approval stamp ("УТВЕРЖДЕНА / Указом Президента ...") standing alone on a
+#: line: the stamp of an attached document, never a section's title.
+APPROVAL_WORDS: tuple[str, ...] = (
+    "утвержден",
+    "утверждена",
+    "утверждено",
+    "утверждены",
+    "утверждаю",
+    "tasdiqlangan",
+    "tasdiqlayman",
+    "тасдиқланган",
+    "тасдиқлайман",
+    "approved",
+)
+#: An unnumbered heading whose text recurs at least this often is a part of each chapter.
+RECURRING_HEADING_MIN = 3
+#: A heading candidate between two lines of at most this many words without a sentence
+#: end is a diagram's label.
+DIAGRAM_LABEL_WORDS = 4
+#: A single unnumbered heading opening a PDF before any text is its title when it has at
+#: least this many words; a heading of at most CONTENTS_TITLE_WORDS words right above a
+#: contents list is that list's title.
+LEADING_TITLE_WORDS = 5
+CONTENTS_TITLE_WORDS = 3
+#: A tagged PDF whose heading tags fail the heading checks this often (at least
+#: TAG_HEADING_MIN_FAILURES of them, and this share) is read by the rules instead: its
+#: author styled list items and paragraphs as headings.
+TAG_HEADING_MAX_FAILING_SHARE = 0.3
+TAG_HEADING_MIN_FAILURES = 5
+#: A page among the first IMPRINT_MAX_PAGE with an ISBN is the imprint page; its lines of at
+#: most IMPRINT_LINE_WORDS words are front matter.
+IMPRINT_MAX_PAGE = 4
+IMPRINT_LINE_WORDS = 12
+#: A block of at most this many characters with no letter or digit (a lone ".") is a
+#: layout artifact and is dropped.
+MAX_ARTIFACT_CHARS = 2
 #: A line with a math operator and fewer real words (4+ letters) than this is a formula.
 FORMULA_MAX_WORDS = 2
 #: Largest gap, in font sizes, between a caption and the table or figure below it.
@@ -337,6 +405,8 @@ PARITY_REPEAT_SHARE = 0.4
 #: consecutive pages, at the same height (within FURNITURE_Y_TOLERANCE of the page height)
 #: and in the same size (within SAME_SIZE_TOLERANCE), is furniture.
 FURNITURE_RUN_PAGES = 3
+#: ... on pages at most this far apart (2: every other page, a book's left or right side).
+FURNITURE_PAGE_STEP = 2
 FURNITURE_Y_TOLERANCE = 0.01
 #: Footnotes start below this share of the page height, in a font this much smaller.
 FOOTNOTE_ZONE = 0.75
@@ -385,6 +455,11 @@ TABLE_CELL_GAP = 2.0
 #: scores TABLE_SCORE_MARGIN higher; a table found by alignment alone needs
 #: TEXT_TABLE_MIN_SCORE.
 TABLE_WEAK_SCORE = 0.3
+#: A table part on the next page continues a table when its left and right edges are within
+#: this share of the width of the first part's; a cut cell's rest between the parts has at
+#: most TABLE_FRAGMENT_WORDS words.
+TABLE_CONTINUATION_SLACK = 0.05
+TABLE_FRAGMENT_WORDS = 4
 TABLE_SCORE_MARGIN = 0.1
 TEXT_TABLE_MIN_SCORE = 0.5
 

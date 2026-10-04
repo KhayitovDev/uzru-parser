@@ -169,9 +169,15 @@ def _restore(subset: list[Line], order: list[Line]) -> list[Line]:
     return [line for line in order if id(line) in wanted]
 
 
+def _rows(lines: list[Line], size: float) -> int:
+    """Number of printed rows the lines sit on: words of one stretched line are one row."""
+    tops = sorted(line.bbox[1] for line in lines)
+    return sum(1 for a, b in zip([float("-inf"), *tops], tops, strict=False) if b - a > 0.5 * size)
+
+
 def _is_column(lines: list[Line], size: float) -> bool:
-    """Running text: enough lines, wide enough, and most of them filling the width."""
-    if len(lines) < config.MIN_COLUMN_LINES:
+    """Running text: enough rows, wide enough, and most of its lines filling the width."""
+    if len(lines) < config.MIN_COLUMN_LINES or _rows(lines, size) < config.MIN_COLUMN_LINES:
         return False
     left = min(line.bbox[0] for line in lines)
     rights = sorted(line.bbox[2] for line in lines)

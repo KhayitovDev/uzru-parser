@@ -1177,3 +1177,301 @@ def test_sentence_left_open_at_a_page_end_goes_on_before_a_capital() -> None:
     assert len(blocks) == 1 and blocks[0].text.endswith("tashkilotlarga beriladi.")
     finished = RawBlock(text=first.text + ".", page=1, font_size=11.0, bbox=first.bbox)
     assert len(build_blocks([finished, rest])) == 2
+
+
+def test_punctuation_only_spacer_blocks_are_dropped_and_counted() -> None:
+    """A web page prints "." as a spacer paragraph; it is layout, not text. A lone number
+    or a longer separator stays."""
+    from uzru_parser.text import CleanStats
+
+    stats = CleanStats()
+    blocks = build_blocks(
+        [heading("1-ILOVA"), body("."), body(PARAGRAPH), body("”."), body("12"), body("***")],
+        stats=stats,
+    )
+    assert [b.text for b in blocks] == ["1-ILOVA", PARAGRAPH, "12", "***"]
+    assert stats.layout_artifacts_removed == 2
+
+
+def ruled(
+    rows: list[list[str]], page: int, bbox: tuple[float, float, float, float] = (85, 60, 553, 800)
+) -> RawBlock:
+    return RawBlock(text="", page=page, bbox=bbox, rows=rows)
+
+
+REMK_HEADER = ["Moddaning nomlanishi", "REMK, mg/kg", "TREK, mg/kg"]
+
+
+def test_a_table_cut_by_a_page_break_is_one_table() -> None:
+    """The part on the next page repeats the header and starts with the rest of a cell the
+    page break cut ("miqdori"); both go back where they belong."""
+    first = ruled(
+        [REMK_HEADER, ["Benz(a)piren", "-", "0,02"], ["Kompleks oʻgʻitlar, umumiy", "-", "120,0"]],
+        29,
+    )
+    rest = RawBlock(text="miqdori", page=30, font_size=11.0)
+    second = ruled(
+        [REMK_HEADER, ["Nitratlar", "-", "130,0"], ["Rux (Zn)", "23,0", "100,0"]],
+        30,
+        (85, 50, 553, 300),
+    )
+    blocks = build_blocks([body(PARAGRAPH), first, rest, second])
+    tables = [b for b in blocks if b.type is BlockType.TABLE]
+    assert len(tables) == 1
+    rows = tables[0].extra["rows"]
+    assert rows[0] == REMK_HEADER and rows.count(REMK_HEADER) == 1
+    assert ["Kompleks oʻgʻitlar, umumiy miqdori", "-", "120,0"] in rows
+    assert rows[-1] == ["Rux (Zn)", "23,0", "100,0"]
+    assert tables[0].extra["page_end"] == 30
+    assert all(b.text != "miqdori" for b in blocks)
+
+
+def test_tables_with_other_columns_or_text_between_stay_apart() -> None:
+    a = ruled([REMK_HEADER, ["Benz(a)piren", "-", "0,02"]], 5)
+    b = ruled([["T/r", "Nomi"], ["1.", "Rux"]], 6)
+    c = ruled([REMK_HEADER, ["Mis", "3,0", "55,0"]], 7)
+    assert len([x for x in build_blocks([a, b]) if x.type is BlockType.TABLE]) == 2
+    text_between = build_blocks(
+        [a, body(PARAGRAPH), ruled([REMK_HEADER, ["Mis", "3,0", "55,0"]], 6)]
+    )
+    assert len([x for x in text_between if x.type is BlockType.TABLE]) == 2
+    far = build_blocks([a, c])  # page 7 does not follow page 5
+    assert len([x for x in far if x.type is BlockType.TABLE]) == 2
+
+
+def test_a_numbered_item_after_a_title_does_not_make_it_a_run_in_title() -> None:
+    item = "2. 2026 — 2030-yillarga moʻljallangan strategiya tasdiqlansin va amalga oshirilsin."
+    raws = [
+        heading("I. Maqsadlar", size=11.0),
+        body(UZ_BODY),
+        heading("II. “Yangi bojxona — 2030” strategiyasi", size=11.0),
+        body(item),
+    ]
+    assert kinds(raws)[2][0] == "heading"
+
+
+def test_a_long_bold_numbered_title_is_still_a_heading() -> None:
+    title = (
+        "VI. Bojxona organlari infratuzilmasini yaxshilash va sunʼiy intellekt "
+        "texnologiyalarini keng joriy etish orqali raqamlashtirish darajasini oshirish"
+    )
+    raws = [heading("V. Bojxona toʻlovlari", size=11.0), body(UZ_BODY)]
+    assert kinds([*raws, heading(title, size=11.0), body(UZ_BODY)])[2][0] == "heading"
+    sentences = ("VI. Bojxona organlari ishlaydi. Ular yangi tizimni joriy etadi va " * 3).strip()
+    assert kinds([*raws, heading(sentences, size=11.0), body(UZ_BODY)])[2][0] != "heading"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Oʻzbekiston Respublikasining Bosh vaziri A. ARIPOV",
+        "Председатель Правительства И.И. ИВАНОВ",
+    ],
+)
+def test_a_signature_is_never_a_heading(text: str) -> None:
+    assert kinds([body(UZ_BODY), heading(text), body(UZ_BODY)])[1][0] != "heading"
+
+
+def test_a_stamp_ending_with_its_label_gives_the_label_as_heading() -> None:
+    stamp = body("Vazirlar Mahkamasining 2026-yil 7-sentabrdagi 473-son qaroriga\nILOVA")
+    blocks = build_blocks([body(UZ_BODY), stamp, heading("CHORA-TADBIRLAR REJASI"), body(UZ_BODY)])
+    labels = [(b.type, b.text) for b in blocks]
+    assert (BlockType.HEADING, "ILOVA") in labels
+    title = next(b for b in blocks if b.text == "CHORA-TADBIRLAR REJASI")
+    label = next(b for b in blocks if b.text == "ILOVA")
+    assert title.type is BlockType.HEADING and (title.level or 0) > (label.level or 0)
+
+
+def test_a_section_typed_as_a_list_item_and_a_missed_sequence_member_are_headings() -> None:
+    listed = RawBlock(
+        text="4.3. Foiz riski va uni boshqarish usullari", page=2, font_size=14.0, bold=1.0
+    )
+    listed.list_item = True
+    raws = [
+        heading("4.1. Bank risklari tizimi"),
+        body(UZ_BODY),
+        heading("4.2. Kredit riski"),
+        body(UZ_BODY),
+        listed,
+        body(UZ_BODY),
+        RawBlock(text="4.4. Likvidlik riski", page=3, font_size=13.5, bold=1.0),
+        body(UZ_BODY),
+    ]
+    found = [b.text for b in build_blocks(raws) if b.type is BlockType.HEADING]
+    assert "4.3. Foiz riski va uni boshqarish usullari" in found
+    assert "4.4. Likvidlik riski" in found
+
+
+def test_opening_headings_before_any_text_are_the_title() -> None:
+    from uzru_parser.structure import document_title
+
+    raws = [
+        heading("OʻZBEKISTON RESPUBLIKASI MOLIYA VAZIRINING BUYRUGʻI"),
+        heading("Moliyaviy hisobot standartlarini tan olish toʻgʻrisida"),
+        body(UZ_BODY),
+        heading("1-ILOVA"),
+        body(UZ_BODY),
+    ]
+    blocks = build_blocks(raws)
+    assert [b.text for b in blocks if b.type is BlockType.HEADING] == ["1-ILOVA"]
+    assert document_title(blocks).startswith("OʻZBEKISTON RESPUBLIKASI MOLIYA")
+
+
+def test_labels_of_a_diagram_are_no_headings() -> None:
+    raws = [
+        body(UZ_BODY),
+        body("Foiz stavkasi"),
+        heading("Devalʼvatsiya", size=11.0),
+        body("Revalʼvatsiya"),
+        body(UZ_BODY),
+    ]
+    assert kinds(raws)[2][0] != "heading"
+
+
+def test_tagged_heading_that_reads_like_a_list_item_is_no_heading() -> None:
+    tagged = RawBlock(
+        text="- metallning bir tarkibliligi;", page=1, font_size=11.0, heading_level=1
+    )
+    tagged.heading_source = "tags"
+    assert kinds([body(UZ_BODY), tagged, body(UZ_BODY)])[1][0] != "heading"
+
+
+def test_an_appendix_label_comes_before_its_stamp_and_stays_whole() -> None:
+    stamp = "Vazirlar Mahkamasining 2026-yil 7-sentabrdagi 473-son qaroriga"
+    blocks = build_blocks([body(UZ_BODY), body(f"{stamp}\nILOVA"), body(UZ_BODY)])
+    texts = [b.text for b in blocks]
+    assert texts == [UZ_BODY, "ILOVA", stamp, UZ_BODY]
+    assert blocks[1].type is BlockType.HEADING
+
+
+@pytest.mark.parametrize("page_layout", [True, False])
+def test_stamp_lines_opening_an_appendix_page_go_under_its_label(page_layout: bool) -> None:
+    lines = [
+        "Oʻzbekiston Respublikasi",
+        "Markaziy banki boshqaruvining",
+        "2026-yil 14-avgustdagi",
+        "22/5-son qaroriga",
+    ]
+    raws = [
+        body(UZ_BODY),
+        *[RawBlock(text=text, page=2, font_size=11.0) for text in lines],
+        RawBlock(text="ILOVA", page=2, font_size=14.0, bold=1.0),
+        RawBlock(text=UZ_BODY, page=2, font_size=11.0),
+    ]
+    blocks = build_blocks(raws, page_layout=page_layout)
+    assert [b.text for b in blocks] == [UZ_BODY, "ILOVA", " ".join(lines), UZ_BODY]
+
+
+def test_short_lines_after_text_on_the_same_page_are_no_stamp() -> None:
+    raws = [
+        body(UZ_BODY),
+        body("Toshkent sh., 2026-yil 4-sentabr"),
+        heading("1-ILOVA"),
+        body(UZ_BODY),
+    ]
+    texts = [b.text for b in build_blocks(raws, page_layout=False)]
+    assert texts.index("Toshkent sh., 2026-yil 4-sentabr") < texts.index("1-ILOVA")
+
+
+@pytest.mark.parametrize("word", ["УТВЕРЖДЕНА", "TASDIQLANGAN", "Утверждаю:"])
+def test_an_approval_stamp_is_no_heading(word: str) -> None:
+    raw = [body(PARAGRAPH), RawBlock(text=word, page=1, font_size=14, bold=1.0, spaced=True)]
+    assert BlockType.HEADING not in block_types([*raw, body(PARAGRAPH)])
+
+
+def test_sibling_headings_opening_a_styled_document_are_its_title() -> None:
+    from uzru_parser.structure import document_title
+
+    raws = [
+        RawBlock(text="УКАЗ", page=1, font_size=16.0, bold=1.0, heading_level=1),
+        RawBlock(text="ПРЕЗИДЕНТА РОССИЙСКОЙ ФЕДЕРАЦИИ", page=1, font_size=16.0, heading_level=1),
+        body(PARAGRAPH),
+        RawBlock(text="Общие положения", page=1, font_size=14.0, bold=1.0, heading_level=2),
+        body(PARAGRAPH),
+    ]
+    blocks = build_blocks(raws, page_layout=False)
+    assert [b.text for b in blocks if b.type is BlockType.HEADING] == ["Общие положения"]
+    assert document_title(blocks) == "УКАЗ ПРЕЗИДЕНТА РОССИЙСКОЙ ФЕДЕРАЦИИ"
+    assert next(b for b in blocks if b.type is BlockType.HEADING).level == 1
+
+
+def test_an_opening_heading_whose_level_comes_back_is_the_outline() -> None:
+    raws = [
+        RawBlock(text="Введение", page=1, font_size=16.0, bold=1.0, heading_level=1),
+        RawBlock(text="Предпосылки", page=1, font_size=14.0, bold=1.0, heading_level=2),
+        body(PARAGRAPH),
+        RawBlock(text="Методы", page=1, font_size=16.0, bold=1.0, heading_level=1),
+        body(PARAGRAPH),
+    ]
+    headings = [b.text for b in build_blocks(raws, page_layout=False) if b.level]
+    assert headings == ["Введение", "Предпосылки", "Методы"]
+
+
+def styled_heading(text: str, level: int) -> RawBlock:
+    return RawBlock(text=text, page=1, font_size=14.0, bold=1.0, heading_level=level)
+
+
+def test_section_numbers_overrule_contradicting_heading_styles() -> None:
+    raws = [
+        styled_heading("1. Цель разработки", 3),
+        body(PARAGRAPH),
+        styled_heading("2. Юридические требования", 3),
+        body(PARAGRAPH),
+        styled_heading("3. Роли пользователей", 2),
+        styled_heading("3.1. Администратор", 3),
+        body(PARAGRAPH),
+        styled_heading("4. Функциональные требования", 1),
+        styled_heading("4.1. Панель мониторинга", 2),
+        body(PARAGRAPH),
+    ]
+    levels = [(b.text[:4], b.level) for b in build_blocks(raws, page_layout=False) if b.level]
+    assert levels == [("1. Ц", 1), ("2. Ю", 1), ("3. Р", 1), ("3.1.", 2), ("4. Ф", 1), ("4.1.", 2)]
+
+
+def test_numbering_that_starts_again_leaves_the_styles_alone() -> None:
+    raws = [
+        styled_heading("1. Введение", 1),
+        styled_heading("1. Первый пункт", 2),
+        body(PARAGRAPH),
+        styled_heading("2. Второй пункт", 2),
+        body(PARAGRAPH),
+        styled_heading("2. Методы", 1),
+        body(PARAGRAPH),
+    ]
+    levels = [b.level for b in build_blocks(raws, page_layout=False) if b.level]
+    assert levels == [1, 2, 2, 1]
+
+
+def test_plain_roman_numbered_titles_in_a_row_are_chapters() -> None:
+    raws = []
+    for number, title in (
+        ("I", "Общие положения"),
+        ("II", "Национальные интересы"),
+        ("III", "Угрозы"),
+    ):
+        raws += [body(f"{number}. {title}"), body(PARAGRAPH), body(PARAGRAPH)]
+    blocks = build_blocks(raws, page_layout=False)
+    assert [b.text for b in blocks if b.type is BlockType.HEADING] == [
+        "I. Общие положения",
+        "II. Национальные интересы",
+        "III. Угрозы",
+    ]
+
+
+def test_a_roman_numbered_list_or_two_plain_lines_are_no_chapters() -> None:
+    as_list = [body(PARAGRAPH), body("I. Первый"), body("II. Второй"), body("III. Третий")]
+    two = [body("I. Общие положения"), body(PARAGRAPH), body(PARAGRAPH), body("II. Интересы")]
+    for raws in (as_list, [*two, body(PARAGRAPH)]):
+        blocks = build_blocks(raws, page_layout=False)
+        assert BlockType.HEADING not in [b.type for b in blocks]
+
+
+def test_a_title_above_a_picture_stays_a_heading() -> None:
+    raws = [
+        RawBlock(text="Проблема", page=2, font_size=24.0, bold=1.0, spaced=True),
+        RawBlock(text="[image]", page=2, role="image", bbox=(70, 120, 300, 300)),
+        body(PARAGRAPH),
+    ]
+    raws[0].bbox = (70, 80, 200, 110)
+    blocks = build_blocks(raws)
+    assert blocks[0].type is BlockType.HEADING and blocks[0].text == "Проблема"

@@ -4,7 +4,7 @@ CPU-first document parser and chunker for **Russian** and **Uzbek** (Latin and C
 documents, built for retrieval-augmented generation (RAG). A Python API on top of a small
 Rust core: no GPU, no machine-learning models to download, no network calls.
 
-> **Alpha (0.1.0).** The API may change before 1.0.
+> **Alpha (0.2.0).** The API may change before 1.0.
 
 ## Installation
 
@@ -69,7 +69,13 @@ for chunk in chunks:
   ],
   "chunk_index": 0,
   "token_count": 44,
-  "metadata": {}
+  "metadata": {
+    "content_type": "prose",
+    "content_types": [
+      "prose"
+    ],
+    "language_source": "chunk"
+  }
 }
 {
   "chunk_id": "61725848e421179b-0001",
@@ -85,7 +91,13 @@ for chunk in chunks:
   ],
   "chunk_index": 1,
   "token_count": 33,
-  "metadata": {}
+  "metadata": {
+    "content_type": "prose",
+    "content_types": [
+      "prose"
+    ],
+    "language_source": "chunk"
+  }
 }
 ```
 
@@ -99,11 +111,24 @@ for chunk in chunks:
 - **Blocks**: `heading` (with `level`), `paragraph`, `list` (items in `extra["items"]`),
   `table`, `footnote`; each with its text, the raw extracted text, page, bounding box (PDF)
   and its own language. `extra["role"]` marks material set apart from the running text:
-  `title_page`, `toc`, `back_matter`, `figure`, `formula`, `caption`.
+  `title_page`, `toc`, `back_matter`, `figure`, `formula`, `caption`, `image`. A document
+  whose first page opens with its title (an act's issuer and name) gets it as
+  `metadata.title`, not as a heading.
 - **Chunks**: text of at most `max_tokens` (estimated, or your own `token_counter`), the
-  `heading_path` of headings above it, page range, language and script, and `metadata`
-  (footnotes of the chunk). Headings start new chunks; title page, contents and back matter
-  are left out of chunk text.
+  `heading_path` of headings above it, page range, language and script, and `metadata`.
+  Headings start new chunks; title page, contents and back matter are left out of chunk
+  text. Tables are cut only between rows; a chunk that goes on with a table starts with its
+  header rows again, and overlap never repeats table rows.
+- **Chunk metadata**: `content_type` (`prose`, `list`, `table`, `formula`, `figure`, `image`
+  or `mixed`) and `content_types`; `tables` with the `header` and `rows` of each table part
+  in the chunk and whether it is `continued` from the previous chunk; `is_appendix` for
+  chunks under an appendix label ("1-ILOVA", "Приложение № 2"); `source_title`;
+  `language_source` (`chunk`, or `document` when the chunk's text alone tells no language,
+  as a table of chemical names); `footnotes`.
+- **Quality warnings**: `metadata.extra["quality"]["warnings"]` lists what could not be read
+  well: `no_text_layer` (scanned pages), `low_confidence_pages`, `pictures_not_read`
+  (formulas or charts set as pictures: their place in the text is kept as `[image]`),
+  `language_uncertain`, `little_or_no_text`.
 - **Language**: `ru`, `uz` (`latin` or `cyrillic` script), `mixed` or `unknown`, per block
   and per chunk.
 - **PDF details**: `metadata.extra["pdf_route"]` says how the PDF was read (`tagged`,
@@ -142,8 +167,9 @@ for chunk in chunks:
   with different column layouts above and below, are reordered; complex layouts may need
   the optional layout model, which was trained on Chinese and English documents.
 - DOCX page numbers are approximate (taken from page breaks).
-- English text is labelled `unknown`.
-- Formulas and charts are reduced to `formula` / `figure` blocks.
+- English text is labelled `unknown` (also the whole document when most of it is English).
+- Formulas and charts are reduced to `formula` / `figure` blocks; pictures inside the text
+  become `[image]` placeholders (their content needs OCR).
 - PDF parsing from several threads is safe but serialised (PyMuPDF is not thread-safe); use
   processes for parallelism.
 

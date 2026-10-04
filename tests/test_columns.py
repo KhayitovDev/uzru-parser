@@ -178,3 +178,20 @@ def test_bands_with_different_gutters_are_cut_one_by_one() -> None:
         {"br"},
     ]
     assert all(len(region) == 8 for region in regions)
+
+
+def test_one_stretched_row_is_not_cut_into_columns() -> None:
+    """A justified line stored word by word looks like narrow columns side by side; a
+    column needs several rows, so the page keeps its order."""
+    above = [
+        line(f"qator {i} toʻliq kenglikdagi oddiy matn satri", 72, 520, 100 + 14 * i)
+        for i in range(4)
+    ]
+    words = ["Aholi", "punktlari", "hududlari,", "shu", "jumladan", "bolalar"]
+    row = [line(word, 72 + 76 * i, 72 + 76 * i + 60, 100 + 14 * 4) for i, word in enumerate(words)]
+    below = [
+        line(f"davomi {i} toʻliq kenglikdagi oddiy matn satri", 72, 520, 100 + 14 * (5 + i))
+        for i in range(4)
+    ]
+    lines = above + row + below
+    assert reading_regions(lines, [], 10.0) == [lines]

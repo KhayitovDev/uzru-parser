@@ -21,6 +21,7 @@ class CleanStats:
     mixed_script_words_fixed: int = 0
     symbol_chars_mapped: int = 0
     symbol_chars_removed: int = 0
+    layout_artifacts_removed: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -29,6 +30,35 @@ class CleanStats:
         self.mixed_script_words_fixed += other.mixed_script_words_fixed
         self.symbol_chars_mapped += other.symbol_chars_mapped
         self.symbol_chars_removed += other.symbol_chars_removed
+        self.layout_artifacts_removed += other.layout_artifacts_removed
+
+
+_KEYWORDS = {word.casefold(): rank for word, rank in config.HEADING_KEYWORDS}
+
+
+def bare_keyword_rank(text: str) -> int | None:
+    """Rank of a heading word standing alone ("ILOVA", "ПРИЛОЖЕНИЕ"): an unnumbered label,
+    as when an act has a single appendix."""
+    word = text.strip().rstrip(".:").casefold()
+    return _KEYWORDS.get(word)
+
+
+def is_label(text: str) -> bool:
+    """A section label and nothing else: "1-ILOVA", "Приложение № 2", "ILOVA"."""
+    text = text.strip()
+    if bare_keyword_rank(text) is not None:
+        return True
+    numbering = numbering_info(text)
+    if numbering is None or numbering[0] != "keyword":
+        return False
+    words = [w for w in text.replace("№", " ").split() if any(c.isalpha() for c in w)]
+    return len(words) <= 1
+
+
+def names_appendix(title: str) -> bool:
+    """An appendix's heading: its label word ("1-ILOVA", "ПРИЛОЖЕНИЕ № 2") opens it."""
+    words = title.replace("-", " ").replace("№", " ").casefold().split()
+    return any(word.strip(".:") in config.APPENDIX_WORDS for word in words[:3])
 
 
 def normalize(text: str) -> str:

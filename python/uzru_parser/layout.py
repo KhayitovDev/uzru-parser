@@ -24,6 +24,7 @@ _FOOTNOTE_START = re.compile(r"^\s*(\d{1,3})(?:\s+\S|(?=[^\W\d_]))")
 _TOC_TITLE = re.compile(
     rf"^\s*(?:{'|'.join(re.escape(t) for t in config.TOC_TITLES)})\s*[:.]?\s*$", re.IGNORECASE
 )
+_ISBN = re.compile(r"\bISBN[\s:]*(?:97[89][-\s]?)?\d[\d\s-]{8,}[\dXx]\b")
 _LEADER = re.compile(r"(?:\.{3,}|…+|(?:\s\.){3,})\s*(\d{1,4})?\s*$")
 _TRAILING_PAGE = re.compile(r"([^\s\d.,:;!?])\s+(\d{1,4})\s*$")
 _NUMBER_ONLY = re.compile(r"^\s*(\d{1,4})\s*$")
@@ -67,7 +68,8 @@ def strip_page_furniture(
         or len(pages_by_key[key]) >= needed
         or _alternating(pages_by_key[key], page_count)
     }
-    drop |= _running_titles(blocks, margin, page_heights)
+    running = _running_titles(blocks, margin, page_heights)
+    drop |= running | _in_running_title_place(blocks, margin, running, page_heights)
     kept = [raw for index, raw in enumerate(blocks) if index not in drop]
     return kept, len(drop)
 
@@ -90,7 +92,8 @@ def _running_titles(
     blocks: list[RawBlock], margin: list[tuple[int, str]], page_heights: dict[int, float]
 ) -> set[int]:
     """Margin texts repeated on consecutive pages at the same height and size (a running
-    chapter title that changes with the chapter)."""
+    chapter title that changes with the chapter). A book prints them on every other page
+    (the chapter on the left, the section on the right), so one page may lie between."""
     by_key: dict[str, list[int]] = defaultdict(list)
     for index, key in margin:
         by_key[key].append(index)
@@ -100,8 +103,9 @@ def _running_titles(
             continue
         run: list[int] = []
         for index in sorted(indexes, key=lambda i: blocks[i].page):
+            step = blocks[index].page - blocks[run[-1]].page if run else 0
             if run and (
-                blocks[index].page != blocks[run[-1]].page + 1
+                not 1 <= step <= config.FURNITURE_PAGE_STEP
                 or not _same_place(blocks[run[-1]], blocks[index], page_heights)
             ):
                 if len(run) >= config.FURNITURE_RUN_PAGES:
@@ -112,6 +116,38 @@ def _running_titles(
         if len(run) >= config.FURNITURE_RUN_PAGES:
             drop.update(run)
     return drop
+
+
+def _in_running_title_place(
+    blocks: list[RawBlock],
+    margin: list[tuple[int, str]],
+    running: set[int],
+    page_heights: dict[int, float],
+) -> set[int]:
+    """Single margin lines printed where the running titles stand on other pages (same height,
+    same size): the running title of a section too short to repeat it on several pages.
+    Only page headers with words count: the bottom margin also holds footnotes."""
+
+    def header(raw: RawBlock) -> bool:
+        height = page_heights.get(raw.page, 0.0)
+        return raw.bbox is not None and raw.bbox[3] <= height * config.MARGIN_BAND
+
+    known = [
+        blocks[index]
+        for index in running
+        if header(blocks[index]) and any(c.isalpha() for c in blocks[index].text)
+    ]
+    found: set[int] = set()
+    if len(known) < config.FURNITURE_RUN_PAGES:
+        return found
+    for index, _ in margin:
+        raw = blocks[index]
+        if index in running or "\n" in raw.text.strip() or not header(raw):
+            continue
+        places = sum(1 for other in known if _same_place(other, raw, page_heights))
+        if places >= config.FURNITURE_RUN_PAGES:
+            found.add(index)
+    return found
 
 
 def _same_place(a: RawBlock, b: RawBlock, page_heights: dict[int, float]) -> bool:
@@ -161,6 +197,21 @@ def mark_title_page(blocks: list[RawBlock], page_count: int) -> None:
     ):
         for raw in first:
             raw.role = raw.role or "title_page"
+
+
+def mark_imprint_page(blocks: list[RawBlock]) -> None:
+    """The imprint page of a book (the page near the front with its ISBN): its short lines
+    (codes, authors, publisher) are front matter and build no headings; a longer paragraph
+    there (the book's abstract) stays text."""
+    pages = {
+        raw.page
+        for raw in blocks
+        if raw.page <= config.IMPRINT_MAX_PAGE and raw.rows is None and _ISBN.search(raw.text)
+    }
+    for raw in blocks:
+        if raw.page in pages and raw.rows is None and not raw.footnote:
+            if len(raw.text.split()) <= config.IMPRINT_LINE_WORDS:
+                raw.role = raw.role or "title_page"
 
 
 def _entry(line: str, page_count: int) -> tuple[bool, int | None]:

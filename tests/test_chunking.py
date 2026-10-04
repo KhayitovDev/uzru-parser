@@ -256,7 +256,7 @@ def test_footnotes_stay_out_of_the_text_and_go_to_metadata() -> None:
     doc = make_doc(para("Birinchi qism"), note, para("ikkinchi qism."))
     result = chunk(doc)
     assert "Manba" not in result[0].text
-    assert result[0].metadata == {"footnotes": ["2 Manba nomi, 1995"]}
+    assert result[0].metadata["footnotes"] == ["2 Manba nomi, 1995"]
 
 
 def test_joined_paragraph_reports_both_pages() -> None:
@@ -349,3 +349,114 @@ def test_overlap_without_room_for_the_lead_in_starts_after_the_list() -> None:
         "Текст после списка."
     ]
     assert [u.text for u in _Run._complete_list_start(list(tail), body, 1, 40)][0].endswith(":")
+
+
+def table(rows: list[list[str]], page: int = 1, spans: list[dict[str, int]] | None = None) -> Block:
+    block = Block(
+        type=BlockType.TABLE,
+        text="\n".join(" | ".join(c for c in row if c) for row in rows),
+        page=page,
+    )
+    block.extra["rows"] = rows
+    if spans:
+        block.extra["spans"] = spans
+    return block
+
+
+LONG_CELL = (
+    "Bojxona organlari tovarlarni rasmiylashtirishda zamonaviy usullarni keng qoʻllaydi va "
+    "nazorat qiladi."
+)
+PESTICIDES = [["T/r", "Nomlanishi", "Konsentratsiya (mg/kg)"]] + [
+    [f"{i}.", f"Pestitsid nomi {i} (Pesticide {i})", f"{i},15"] for i in range(1, 90)
+]
+
+
+def test_a_long_table_repeats_its_header_and_never_repeats_rows() -> None:
+    chunks = Chunker(max_tokens=200, overlap=40).chunk(make_doc(table(PESTICIDES)))
+    assert len(chunks) > 2
+    header = "T/r | Nomlanishi | Konsentratsiya (mg/kg)"
+    assert all(c.text.startswith(header) for c in chunks)
+    rows = [line for c in chunks for line in c.text.split("\n") if line != header]
+    assert len(rows) == len(set(rows)) == 89  # every row once, none cut
+    assert all(c.token_count <= 200 for c in chunks)
+    assert chunks[0].metadata["tables"][0]["continued"] is False
+    assert all(c.metadata["tables"][0]["continued"] for c in chunks[1:])
+    assert sum(len(c.metadata["tables"][0]["rows"]) for c in chunks) == 89
+    assert all(c.metadata["content_type"] == "table" for c in chunks)
+
+
+def test_overlap_after_a_table_does_not_repeat_its_rows() -> None:
+    doc = make_doc(table(PESTICIDES[:20]), para(sentences(40)))
+    chunks = Chunker(max_tokens=200, overlap=60).chunk(doc)
+    header = "T/r | Nomlanishi | Konsentratsiya (mg/kg)"  # repeated on purpose
+    for previous, following in zip(chunks, chunks[1:], strict=False):
+        rows = {line for line in previous.text.split("\n") if " | " in line} - {header}
+        assert not rows & set(following.text.split("\n"))
+
+
+@pytest.mark.parametrize(
+    ("rows", "spans", "expected"),
+    [
+        ([["T/r", "Nomi", "Qiymati"], ["1.", "Rux", "23,0"], ["2.", "Mis", "3,0"]], [], 1),
+        # a unit line above the header belongs to it
+        ([["", "", "(mlrd soʻm)"], ["Manba", "2026-yil", "Jami"], ["Budjet", "40", "109"]], [], 2),
+        # a header merged over two columns heads a second header row
+        (
+            [["Nomi", "Hududlar", ""], ["Nomi", "toza", "ifloslangan"], ["Ichak", "1 – 9", "10"]],
+            [{"row": 0, "col": 1, "rows": 1, "cols": 2}],
+            2,
+        ),
+        # numbered items and stray quotes are data
+        ([["1.", "Rux", "23,0"], ["2.", "Mis", "3,0"], ["3.", "Kobalt", "5,0"]], [], 0),
+        ([["“", "", ""], ["33.", "Undirilishi", "2026-yil"], ["", "", "”."]], [], 0),
+        # long sentences are data
+        ([[LONG_CELL, "x"], ["a", "b"]], [], 0),
+    ],
+)
+def test_header_rows(rows: list[list[str]], spans: list[dict[str, int]], expected: int) -> None:
+    from uzru_parser.chunking import header_row_count
+
+    assert header_row_count(rows, spans) == expected
+
+
+def test_a_chunk_without_a_language_of_its_own_takes_the_documents() -> None:
+    from uzru_parser import LanguageInfo
+
+    names = table(
+        [["T/r", "Nomi", "TREK"]] + [[f"{i}.", f"Pyriproxyfen-{i}", "1,15"] for i in range(30)]
+    )
+    doc = make_doc(head("12-ILOVA", 1), names)
+    doc.language = LanguageInfo("uz", "latin", 1.0)
+    doc.metadata.title = "Tuproqning sanitariya qoidalari"
+    chunks = Chunker(max_tokens=600, overlap=0).chunk(doc)
+    assert chunks[0].language == "uz"
+    assert chunks[0].metadata["language_source"] == "document"
+    assert chunks[0].metadata["is_appendix"] is True
+    assert chunks[0].metadata["source_title"] == "Tuproqning sanitariya qoidalari"
+
+
+def test_a_russian_document_does_not_lend_its_language_to_latin_text() -> None:
+    from uzru_parser import LanguageInfo
+
+    doc = make_doc(table([["Pesticide", "Dose"], ["Pyriproxyfen", "1,15"], ["Diazinon", "1,15"]]))
+    doc.language = LanguageInfo("ru", "cyrillic", 1.0)
+    chunks = chunk(doc)
+    assert chunks[0].language != "ru"
+    assert chunks[0].metadata["language_source"] == "chunk"
+
+
+def test_a_short_intro_travels_with_the_first_subsection() -> None:
+    doc = make_doc(
+        head("1-ILOVA", 1),
+        para("Vazirlar Mahkamasining 2026-yil 4-sentabrdagi 464-son qaroriga"),
+        head("1-bob. Umumiy qoidalar", 2),
+        para(sentences(20)),
+        head("2-bob. Yakuniy qoidalar", 2),
+        para(sentences(20)),
+    )
+    chunks = Chunker(max_tokens=600, overlap=0).chunk(doc)
+    assert chunks[0].text.startswith("1-ILOVA")
+    assert "Umumiy qoidalar" in chunks[0].text
+    assert chunks[0].heading_path == ["1-ILOVA", "1-bob. Umumiy qoidalar"]
+    assert chunks[1].heading_path == ["1-ILOVA", "2-bob. Yakuniy qoidalar"]

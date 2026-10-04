@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.2.0 (2026-10-04)
+
+Measured with `tools/evaluate.py` on ten real Uzbek and Russian documents (legal acts,
+textbooks, an FAQ): heading-path accuracy rose from 0.02–0.88 to 0.90–1.00 per document,
+tables found in the sanitary-rules PDF from 6 to 11 of 12, table rows repeated by overlap
+from 18 to 0, at the same speed and memory.
+
+- PDF reading order: justified lines stored word by word are rebuilt before the XY-cut, and
+  a column needs several rows, so a stretched line stays in its sentence.
+- Centred multi-line titles and stamps are one block; "." spacer paragraphs are dropped.
+- Tables: a table cut by a page break is joined (repeated header dropped, a cut cell's rest
+  put back); a page number in a table frame is no row; values starting in lowercase are no
+  longer taken for words cut between cells, so ruled tables keep all their columns.
+- Chunking: tables are cut between rows with the header repeated and no overlap rows;
+  chunk metadata (`content_type`, `tables` with header and rows, `is_appendix`,
+  `source_title`, `language_source`); a chunk without its own language takes the
+  document's.
+- Headings: signatures, diagram labels and text that only looks like a heading are vetoed;
+  unreliable PDF heading tags are ignored; appendix stamps give their label as a heading;
+  titles nest under their label; sections typed as list items and sequences with a missing
+  member are found; the document's opening title and a contents title leave the outline;
+  recurring end-of-chapter headings sit beside the sections; a byte-order mark no longer
+  hides a DOCX title; long numbered titles and "II." after an item-numbered paragraph are
+  kept.
+- Pictures inside the text are kept as `[image]` placeholders; documents report quality
+  warnings (`no_text_layer`, `low_confidence_pages`, `pictures_not_read`, ...).
+- The document title is taken from the content first; a file title is used only when the
+  document says it too.
+- `tools/evaluate.py`: quality evaluation of a folder of documents, with optional
+  hand-made heading outlines (`--gold DIR`).
+
+Then checked on 21 other files never used while developing (Uzbek legal acts, Russian
+decrees converted from scans, technical specifications, an English book, slide decks),
+which found these generic faults, now fixed:
+
+- Language: English documents were labelled `uz` (a few Uzbek-looking lines decided), and
+  their chunks then took `uz` too; a document mostly in no known language is `unknown`.
+- DOCX: a cell merged down over rows was repeated in every row it covers (a header read
+  three times); a placeholder title property ("Untitled") is ignored; a bold line that looks
+  like an outline-level title is its sibling, not its child.
+- Appendices: the stamp ("... qaroriga") now opens its appendix after the label instead of
+  ending the previous chapter, also when its lines are separate blocks; the label heading no
+  longer swallows it.
+- Chunking: a short text under a heading stays with the first subsection instead of making
+  a chunk of a few tokens.
+- PDF: bullets glued to their text ("■Always ...", "✦ ...") start list items and keep their
+  wrapped lines (Rust core); a book's running titles on every other page, and a short
+  section's single one, are removed; a picture placeholder no longer turns the title above
+  it into a caption.
+- Headings: section numbers overrule contradicting Word outline levels; plain "I. / II. /
+  III." chapter lines are chapters; "УТВЕРЖДЕНА" / "TASDIQLANGAN" stamps are no headings;
+  a heading-style line right under another heading counts; bookmark levels are not
+  overridden by a look-alike numbered style; the opening headings of a styled document are
+  its title only when they are siblings or their level does not come back.
+- Titles: a PDF's file title is also accepted when its words all appear on the cover; a
+  logo letter is no title.
+
 ## 0.1.0 (2026-10-04)
 
 First public alpha release.
