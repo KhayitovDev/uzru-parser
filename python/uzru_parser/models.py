@@ -57,6 +57,8 @@ class Page:
     height: float = 0.0
     block_count: int = 0
     needs_ocr: bool = False
+    #: Reader-specific facts, e.g. a PDF page's ``confidence`` and its ``issues``.
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -87,7 +89,12 @@ class Document:
         return "\n\n".join(b.text for b in self.blocks if b.text)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        """The document as plain data; a page without extra facts has no ``extra`` key."""
+        data = asdict(self)
+        for page in data["pages"]:
+            if not page["extra"]:
+                del page["extra"]
+        return data
 
 
 def make_document_id(source: str, text: str) -> str:

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from . import config
 from .models import Block, BlockType, LanguageInfo
+from .profile import StyleProfile, style_of
 from .text import (
     CleanStats,
     Hyphenator,
@@ -63,7 +64,7 @@ class RawBlock:
     ``figure``), ``footnote`` a footnote entry, and ``footnote_refs`` the reference marks that
     were removed from the text. ``original`` is the text as extracted, ``spaced`` says the
     block has clearly more space above it than a normal line, ``in_figure`` that it lies
-    inside a figure (a drawing with labels).
+    inside a figure (a drawing with labels), ``tagged`` that a tagged PDF's structure made it.
     """
 
     text: str
@@ -81,6 +82,12 @@ class RawBlock:
     spaced: bool = False
     heading_source: str | None = None
     in_figure: bool = False  # lies inside a drawing together with its labels
+    tagged: bool = False  # made from a tagged PDF's structure element
+    font: str | None = None  # font family of most of the text (PDF)
+    italic: float = 0.0  # share of characters set in an italic face
+    #: Merged table cells: (row, column, rows spanned, columns spanned) in ``rows``.
+    spans: list[tuple[int, int, int, int]] | None = None
+    layout_title: bool = False  # the optional layout model sees a title here
 
 
 @dataclass
@@ -115,20 +122,23 @@ def build_blocks(
     stats: CleanStats | None = None,
     text_is_clean: bool = False,
     page_layout: bool = True,
+    profile: StyleProfile | None = None,
 ) -> list[Block]:
     """Classify raw blocks into headings, lists, tables, footnotes and paragraphs.
 
     ``text_is_clean`` says the reader already cleaned and hyphen-repaired block text (PDF);
     table cells are always cleaned here. Without ``page_layout`` (DOCX) a sentence broken
-    over two paragraphs is joined again, not only one broken by a page break.
+    over two paragraphs is joined again, not only one broken by a page break. With a style
+    ``profile`` (PDF) a heading needs a heading style and a second signal, and unnumbered
+    heading styles rank below the numbered ones that are more prominent.
     """
     repair = Hyphenator(sorted(compounds)).repair
     titles = _TitleIndex(outline or [], raw_blocks)
     raws = [part for raw in raw_blocks for part in _split_raw(raw, titles)]
     body_size = body_font_size(raws) or 0.0
     prepared = [(raw, _clean(raw, repair, stats, text_is_clean)) for raw in raws]
-    headings = _decide_headings(prepared, body_size, titles, _quoted(prepared))
-    _assign_levels(headings, prepared)
+    headings = _decide_headings(prepared, body_size, titles, _quoted(prepared), profile)
+    _assign_levels(headings, prepared, profile)
 
     blocks: list[Block] = []
     extended: list[Block] = []
@@ -210,15 +220,26 @@ def _clean_rows(
     rows: list[list[str]], repair: Repair, stats: CleanStats | None = None
 ) -> list[list[str]]:
     """Normalize cells, merge a header split over rows, drop empty rows and columns."""
+    return _clean_table(rows, repair, stats)[0]
+
+
+def _clean_table(
+    rows: list[list[str]], repair: Repair, stats: CleanStats | None = None
+) -> tuple[list[list[str]], list[int], list[int]]:
+    """:func:`_clean_rows`, plus the index in ``rows`` of every kept row and column."""
     cleaned = [[_flatten(clean(repair(cell or ""), stats)) for cell in row] for row in rows]
-    cleaned = _blank_repeated_header_cells(_merge_header_rows(cleaned))
-    cleaned = [row for row in cleaned if any(row)]
+    merged, row_ids = _merge_header_rows_ids(cleaned)
+    cleaned = _blank_repeated_header_cells(merged)
+    kept = [i for i, row in enumerate(cleaned) if any(row)]
+    cleaned = [cleaned[i] for i in kept]
+    row_ids = [row_ids[i] for i in kept]
     used = [
         index
         for index in range(max((len(row) for row in cleaned), default=0))
         if any(index < len(row) and row[index] for row in cleaned)
     ]
-    return [[row[index] if index < len(row) else "" for index in used] for row in cleaned]
+    table = [[row[index] if index < len(row) else "" for index in used] for row in cleaned]
+    return table, row_ids, used
 
 
 def _starts_lowercase(text: str) -> bool:
@@ -232,7 +253,13 @@ def _merge_header_rows(rows: list[list[str]]) -> list[list[str]]:
     The continuation row has fewer filled cells than the row above, all starting lowercase;
     an ordinary data row fills its cells.
     """
+    return _merge_header_rows_ids(rows)[0]
+
+
+def _merge_header_rows_ids(rows: list[list[str]]) -> tuple[list[list[str]], list[int]]:
+    """:func:`_merge_header_rows`, plus the index in ``rows`` of every remaining row."""
     rows = [list(row) for row in rows]
+    ids = list(range(len(rows)))
     index = 0
     while index + 1 < min(len(rows), config.HEADER_ROWS):
         upper, lower = rows[index], rows[index + 1]
@@ -249,7 +276,8 @@ def _merge_header_rows(rows: list[list[str]]) -> list[list[str]]:
         for c in filled:
             upper[c] = f"{upper[c]} {lower[c]}"
         del rows[index + 1]
-    return rows
+        del ids[index + 1]
+    return rows, ids
 
 
 def _blank_repeated_header_cells(rows: list[list[str]]) -> list[list[str]]:
@@ -268,10 +296,35 @@ def _rows_text(rows: list[list[str]]) -> str:
 def _table_block(
     raw: RawBlock, rows: list[list[str]], repair: Repair, stats: CleanStats | None
 ) -> Block:
-    rows = _clean_rows(rows, repair, stats)
+    rows, row_ids, column_ids = _clean_table(rows, repair, stats)
     block = _block(BlockType.TABLE, _rows_text(rows), raw)
     block.extra["rows"] = rows
+    if raw.spans:
+        block.extra["spans"] = _kept_spans(raw.spans, row_ids, column_ids)
     return block
+
+
+def _kept_spans(
+    spans: list[tuple[int, int, int, int]], row_ids: list[int], column_ids: list[int]
+) -> list[dict[str, int]]:
+    """Merged cells as ``{"row", "col", "rows", "cols"}`` in the cleaned table's numbering;
+    the span counts the rows and columns that are still there."""
+    kept: list[dict[str, int]] = []
+    for row, column, height, width in spans:
+        if row not in row_ids or column not in column_ids:
+            continue
+        rows = sum(1 for r in row_ids if row <= r < row + height)
+        columns = sum(1 for c in column_ids if column <= c < column + width)
+        if rows > 1 or columns > 1:
+            kept.append(
+                {
+                    "row": row_ids.index(row),
+                    "col": column_ids.index(column),
+                    "rows": rows,
+                    "cols": columns,
+                }
+            )
+    return kept
 
 
 # --- Blocks -------------------------------------------------------------------------------
@@ -423,6 +476,10 @@ def _piece(raw: RawBlock, lines: list[str], **changes: object) -> RawBlock:
         font_size=raw.font_size,
         bold=raw.bold,
         spaced=raw.spaced,
+        tagged=raw.tagged,
+        font=raw.font,
+        italic=raw.italic,
+        layout_title=raw.layout_title,
     )
     for name, value in changes.items():
         setattr(part, name, value)
@@ -614,8 +671,10 @@ def _is_formula(text: str) -> bool:
     return words < config.FORMULA_MAX_WORDS
 
 
-def _signals(text: str, raw: RawBlock, body_size: float) -> set[str] | None:
-    """Heading signals of a block, or ``None`` when it cannot be a heading at all."""
+def _signals(text: str, raw: RawBlock, body_size: float, styled: bool = False) -> set[str] | None:
+    """Heading signals of a block, or ``None`` when it cannot be a heading at all. A short
+    ``styled`` line (set in one of the document's heading styles) may end with a full stop,
+    as run-in subheadings of Russian and Uzbek textbooks do ("Валюта бозори.")."""
     flat = _flatten(text)
     numbering = numbering_info(flat)
     keyword = numbering is not None and numbering[0] == "keyword"
@@ -633,8 +692,9 @@ def _signals(text: str, raw: RawBlock, body_size: float) -> set[str] | None:
     uppercase = _uppercase(flat)
     section = keyword or (numbering is not None and numbering[0] == "decimal" and numbering[1] >= 2)
     wrapped_keyword = section and flat[-1] == ","  # a long section title wraps on
+    titled = styled and len(flat.split()) <= config.MAX_TITLE_WORDS
     if (flat[-1] in ",;" and not wrapped_keyword) or (
-        flat[-1] == "." and not uppercase and not numbering
+        flat[-1] == "." and not uppercase and not numbering and not titled
     ):
         return None
 
@@ -654,14 +714,18 @@ def _signals(text: str, raw: RawBlock, body_size: float) -> set[str] | None:
     return signals
 
 
-def _kind(text: str, raw: RawBlock) -> tuple[object, ...]:
-    """Level class of a heading: chapter word rank, numbering depth, or font."""
+def _kind(text: str, raw: RawBlock, detailed: bool = False) -> tuple[object, ...]:
+    """Level class of a heading: chapter word rank, numbering depth, or font. ``detailed``
+    (with a style profile) also tells capitals and italics apart."""
     numbering = numbering_info(_flatten(text))
     if numbering and numbering[0] == "keyword":
         return ("kw", numbering[1])
     if numbering and numbering[0] in ("decimal", "ordered"):
         return ("dec", numbering[1])
-    return ("font", _size_key(raw.font_size or 0.0), raw.bold >= config.BOLD_SHARE)
+    font = ("font", _size_key(raw.font_size or 0.0), raw.bold >= config.BOLD_SHARE)
+    if detailed:
+        return (*font, _uppercase(text), raw.italic >= config.BOLD_SHARE)
+    return font
 
 
 def _is_plain_item(text: str) -> bool:
@@ -681,14 +745,33 @@ def _item_number(text: str) -> int | None:
     return None
 
 
+def _set_apart(index: int, prepared: list[tuple[RawBlock, str]], profile: StyleProfile) -> bool:
+    """The block stands apart from the text around it: space above it (or the top of its
+    page) and, below it, space, the start of the body text, a list or a table."""
+    raw = prepared[index][0]
+    previous = next(
+        (r for r, t in reversed(prepared[:index]) if t.strip() and not r.footnote), None
+    )
+    following = next((r for r, t in prepared[index + 1 :] if t.strip() and not r.footnote), None)
+    above = raw.spaced or previous is None or previous.page != raw.page
+    if following is None:
+        return above
+    body_after = style_of(following) == profile.body
+    structured = following.rows is not None or following.list_item
+    spaced_below = following.page == raw.page and following.spaced
+    return above and (spaced_below or body_after or structured)
+
+
 def _decide_headings(
     prepared: list[tuple[RawBlock, str]],
     body_size: float,
     titles: _TitleIndex,
     quoted: set[int],
+    profile: StyleProfile | None = None,
 ) -> list[_Heading | None]:
     headings: list[_Heading | None] = []
     plain_items: list[int] = []
+    use_profile = profile is not None and bool(profile.headings)
     for index, (raw, text) in enumerate(prepared):
         size = raw.font_size or 0.0
         styled = raw.heading_level is not None and raw.heading_source != "numbering"
@@ -708,14 +791,33 @@ def _decide_headings(
             continue
         known = titles.match(text, raw.page) if titles else None
         if known is not None and has_real_words(text):
-            headings.append(_Heading(known.source, _kind(text, raw), size, known.level))
+            kind = _kind(text, raw, use_profile)
+            headings.append(_Heading(known.source, kind, size, known.level))
             continue
-        signals = _signals(text, raw, body_size)
-        if signals is None or len(signals) < config.MIN_HEADING_SIGNALS:
+        heading_style = (
+            use_profile and profile is not None and profile.rank(style_of(raw)) is not None
+        )
+        signals = _signals(text, raw, body_size, heading_style)
+        if signals is None:
+            headings.append(None)
+            continue
+        styled_look = bool(signals & {"bigger", "bold", "uppercase"})
+        if use_profile and profile is not None:
+            accepted = heading_style and (
+                bool(signals & {"number", "keyword"})
+                or raw.layout_title
+                or _set_apart(index, prepared, profile)
+            )
+            accepted = accepted or (raw.layout_title and styled_look)
+        else:
+            accepted = len(signals) >= config.MIN_HEADING_SIGNALS or (
+                raw.layout_title and bool(signals)
+            )
+        if not accepted:
             headings.append(None)
             continue
         source = "numbering" if "number" in signals else "font"
-        headings.append(_Heading(source, _kind(text, raw), size))
+        headings.append(_Heading(source, _kind(text, raw, use_profile), size))
         if _is_plain_item(text):
             plain_items.append(index)
     _keep_heading_sequences(headings, prepared, plain_items, body_size)
@@ -956,7 +1058,11 @@ def _keep_heading_sequences(
             headings[index] = None
 
 
-def _assign_levels(headings: list[_Heading | None], prepared: list[tuple[RawBlock, str]]) -> None:
+def _assign_levels(
+    headings: list[_Heading | None],
+    prepared: list[tuple[RawBlock, str]],
+    profile: StyleProfile | None = None,
+) -> None:
     """Turn heading kinds into levels, so a child can never sit above its parent."""
     present = [h for h in headings if h is not None and h.kind[0] not in ("fixed", "below")]
     numbered = sorted({h.kind for h in present if h.kind[0] in ("kw", "dec")}, key=_kind_order)
@@ -980,9 +1086,19 @@ def _assign_levels(headings: list[_Heading | None], prepared: list[tuple[RawBloc
         levels[kind] = current
         previous = kind
     deepest = current
+    ranks = _style_ranks(headings, prepared, profile)
     for kind in fonts:
         if fixed_levels[kind]:
             levels[kind] = fixed_levels[kind].most_common(1)[0][0]
+            continue
+        rank = ranks.get(kind)
+        above = [
+            levels[k]
+            for k in numbered
+            if rank is not None and ranks.get(k) is not None and ranks[k] < rank
+        ]
+        if above:  # less prominent than a numbered heading style: inside it
+            levels[kind] = max(above) + 1
             continue
         size = kind[1]
         peer = next((k for k in numbered if sizes[k] <= size), None)  # type: ignore[operator]
@@ -1005,6 +1121,22 @@ def _assign_levels(headings: list[_Heading | None], prepared: list[tuple[RawBloc
     _enforce_parents(headings, prepared)
     _place_subheadings(headings)
     _close_level_gaps(headings)
+
+
+def _style_ranks(
+    headings: list[_Heading | None],
+    prepared: list[tuple[RawBlock, str]],
+    profile: StyleProfile | None,
+) -> dict[tuple[object, ...], int]:
+    """The usual profile rank of each heading kind's style (1 = most prominent)."""
+    if profile is None or not profile.headings:
+        return {}
+    seen: dict[tuple[object, ...], Counter[int]] = defaultdict(Counter)
+    for heading, (raw, _) in zip(headings, prepared, strict=True):
+        rank = profile.rank(style_of(raw)) if heading is not None else None
+        if heading is not None and rank is not None:
+            seen[heading.kind][rank] += 1
+    return {kind: counts.most_common(1)[0][0] for kind, counts in seen.items()}
 
 
 def _place_subheadings(headings: list[_Heading | None]) -> None:
@@ -1063,10 +1195,12 @@ def _close_level_gaps(headings: list[_Heading | None]) -> None:
             h.level = rank[h.level]
 
 
-def _font_order(kind: tuple[object, ...]) -> tuple[float, bool]:
-    """Bigger first, bold before regular."""
+def _font_order(kind: tuple[object, ...]) -> tuple[float, bool, bool, bool]:
+    """Bigger first, bold before regular, then capitals and italics (detailed kinds)."""
     size, bold = float(kind[1]), bool(kind[2])  # type: ignore[arg-type]
-    return (-size, not bold)
+    caps = bool(kind[3]) if len(kind) > 3 else False
+    italic = bool(kind[4]) if len(kind) > 4 else False
+    return (-size, not bold, not caps, not italic)
 
 
 def _kind_order(kind: tuple[object, ...]) -> tuple[int, int]:

@@ -11,6 +11,7 @@ licence terms that apply. Full licence texts are in `LICENSES/`.
 | Source code (Python, Rust), tests and tools | MIT (`LICENSE`) |
 | Data files `src/data/langid.bin` and `src/data/lexicon.txt` | CC BY-SA 4.0 (`src/data/LICENSE`), because they are adapted from CC BY-SA 4.0 sources |
 | Portions adapted from third parties | Their own licences, listed below |
+| Optional layout model file (not shipped with the package) | Apache-2.0 (section 4.1) |
 
 ## 1. Bundled data files
 
@@ -51,6 +52,18 @@ stripping endings, deduplicated and sorted.
 | [natasha/razdel](https://github.com/natasha/razdel): sentence segmentation method, rules, Russian abbreviation lists, unit test cases | `src/sentences.rs` | MIT (notice in section 6.1) |
 | Unicode confusables data ([UTS #39](https://www.unicode.org/reports/tr39/), `confusables.txt`): Cyrillic–Latin look-alike pairs | `src/confusables.rs` | Unicode License v3 (`LICENSES/Unicode-3.0.txt`) |
 | Adobe Symbol encoding to Unicode mapping ([Adobe Glyph List](https://github.com/adobe-type-tools/agl-aglfn)) | `src/symbols.rs` | BSD-3-Clause (notice in section 6.3) |
+| PP-DocLayout-S class names in output order and input format (480×480 RGB image, ImageNet mean and standard deviation, `scale_factor`), from the model's `inference.yml` ([PaddlePaddle/PP-DocLayout-S](https://huggingface.co/PaddlePaddle/PP-DocLayout-S)) and the ONNX export's model card ([stefanj0/PP-DocLayout-S-ONNX](https://huggingface.co/stefanj0/PP-DocLayout-S-ONNX)) | `python/uzru_parser/layout_model.py` | Apache-2.0 (`LICENSES/Apache-2.0.txt`) |
+
+Methods studied and written again in our own code. No code or text was copied from them;
+only the ideas and the thresholds named here were taken.
+
+| Source | Licence | What was taken | Where |
+|---|---|---|---|
+| [ragflow pull request 19957](https://github.com/infiniflow/ragflow/pull/19957) (page header and footer detection) | Apache-2.0 | Running headers and footers found on most even or odd pages (40%) and on runs of 3 or more pages at the same height; page numbers in dashes, brackets or Roman numerals | `layout.py`, `config.py` |
+| [opendataloader-pdf](https://github.com/opendataloader-project/opendataloader-pdf) (`HeadingProcessor`, `HeaderFooterProcessor`) | Apache-2.0 | Heading candidates are text styles bigger, bolder or rarer than the body text; heading levels follow the order of those styles | `profile.py`, `structure.py` |
+| [XY-Cut++](https://arxiv.org/abs/2504.10258) (paper) | Not checked (arxiv.org was not reachable); the method only | Full-width lines and boxes split a page into bands before columns are cut | `columns.py`, `layout_model.py` |
+| [PyMuPDF discussion 2389](https://github.com/pymupdf/PyMuPDF/discussions/2389) and [issue 5125](https://github.com/pymupdf/PyMuPDF/issues/5125) | Public discussion; no code taken | Finding the structure tree from the catalog; dropping the tree in memory when marked-content lookups would be slow | `tagged.py` |
+| [MuPDF](https://github.com/ArtifexSoftware/mupdf) source (`pdf-op-run.c`, `stext-device.c`) | AGPL-3.0 | Read only, to understand how MuPDF links tags to the page text, so that `tagged.py` can work around it; nothing copied | `tagged.py` |
 
 ## 3. Rust libraries compiled into the extension module
 
@@ -74,6 +87,22 @@ All are used unmodified, as published on crates.io.
 | [PyMuPDF](https://github.com/pymupdf/PyMuPDF) | **AGPL-3.0** or Artifex commercial licence | Used for PDF input. Distributing or offering a service built on uzru-parser together with PyMuPDF requires compliance with the AGPL-3.0 or a commercial licence from Artifex. |
 | [python-docx](https://github.com/python-openxml/python-docx) | MIT | Used for DOCX input. |
 | [lxml](https://github.com/lxml/lxml) (dependency of python-docx) | BSD-3-Clause | |
+| [ONNX Runtime](https://github.com/microsoft/onnxruntime) (`onnxruntime`) | MIT | Optional (`layout` extra): runs the layout model. |
+| [NumPy](https://github.com/numpy/numpy) (dependency of ONNX Runtime) | BSD-3-Clause (some bundled parts 0BSD, MIT, Zlib, CC0-1.0) | Optional: prepares the page image for the layout model. |
+| flatbuffers, packaging, protobuf (dependencies of ONNX Runtime) | Apache-2.0; Apache-2.0 OR BSD-2-Clause; BSD-3-Clause | Optional. |
+
+### 4.1 Optional layout model (downloaded separately, not bundled)
+
+The `layout` extra runs PP-DocLayout-S, which the user downloads and points to with
+`UZRU_LAYOUT_MODEL`. No model file is part of this repository or its packages.
+
+| Material | Licence | Note |
+|---|---|---|
+| [PP-DocLayout-S](https://huggingface.co/PaddlePaddle/PP-DocLayout-S) by PaddlePaddle | Apache-2.0 | The original model, published in PaddlePaddle's format only. Trained on Chinese and English documents. |
+| [stefanj0/PP-DocLayout-S-ONNX](https://huggingface.co/stefanj0/PP-DocLayout-S-ONNX), file `pp_doclayout_s.onnx` | Apache-2.0 (as stated by the uploader) | A community conversion of the model above with `paddle2onnx`, not published by PaddlePaddle. 4,917,852 bytes, SHA-256 `33688dbee1c23e34b81777e97cb428eb40f24b242c02b5f623484959e830aec8`. |
+
+Anyone who redistributes the model file must follow the Apache-2.0 terms: include the licence
+(`LICENSES/Apache-2.0.txt`) and say that the file was converted.
 
 ## 5. Development only (not distributed)
 
@@ -86,8 +115,11 @@ All are used unmodified, as published on crates.io.
 
 Material reviewed and deliberately **not** used because of its licence: Uzbek and Russian
 Hunspell dictionaries (GPL), Text-Hyphen-RU patterns (GPL-3.0), Pyphen dictionaries
-(GPL/LGPL/MPL), PyMuPDF-Utilities and PyMuPDF4LLM code (AGPL-3.0), RusLawOD (CC BY-NC 4.0),
+(GPL/LGPL/MPL), PyMuPDF-Utilities and PyMuPDF4LLM code (AGPL-3.0), pymupdf_layout (AGPL-3.0 or
+commercial), Ultralytics YOLO layout models (AGPL-3.0), RusLawOD (CC BY-NC 4.0),
 coppercitylabs/uzbek-tokenizers and murodbek/uz-text-classification (no licence stated).
+Not used because of their size: Docling, MinerU, Marker, Unstructured, PyTorch-based models
+and the PP-DocLayoutV2 model (213 MB) used by ppu-doclayout.
 
 ## 6. Licence notices
 

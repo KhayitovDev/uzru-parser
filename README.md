@@ -11,6 +11,7 @@ Rust core: no GPU, no machine-learning models to download, no network calls.
 ```bash
 pip install uzru-parser            # DOCX support
 pip install "uzru-parser[pdf]"     # DOCX and PDF support
+pip install "uzru-parser[layout]"  # PDF support plus the optional layout model (ONNX Runtime)
 ```
 
 PDF support uses [PyMuPDF](https://github.com/pymupdf/PyMuPDF), installed by the `pdf` extra.
@@ -105,19 +106,41 @@ for chunk in chunks:
   are left out of chunk text.
 - **Language**: `ru`, `uz` (`latin` or `cyrillic` script), `mixed` or `unknown`, per block
   and per chunk.
+- **PDF details**: `metadata.extra["pdf_route"]` says how the PDF was read (`tagged`,
+  `rules` or `rules+layout_model`, see below), `pdf_tags` what its structure tags were,
+  `styles` the body and heading styles found; each page's `extra` holds its `confidence`
+  (0 to 1) and the `issues` behind it; tables list merged cells in `extra["spans"]`.
+
+## PDF routes
+
+- **Tagged PDFs** (for example Word's "Save as PDF" with document structure tags): the
+  author's headings, paragraphs, lists, tables and notes are read from the tags, after
+  checking that they cover the text and follow the page. Needs PyMuPDF 1.26.6 or newer.
+- **Other PDFs** are rebuilt from the layout: a style profile of the whole document (body
+  and heading styles), headings that need a heading style and a second signal (numbering,
+  bookmarks or contents, space around them), an XY-cut reading order for columns, ruled and
+  unruled tables, and a confidence score per page.
+- **Optional layout model** (off by default): with the `layout` extra,
+  `Parser(layout_model=True)` lets [PP-DocLayout-S](https://huggingface.co/PaddlePaddle/PP-DocLayout-S)
+  (Apache-2.0, 4.7 MB as ONNX, about 20 ms a page on a CPU) correct the pages with low
+  confidence: tables, figures, formulas, headers and footers, titles, reading order. Point
+  `UZRU_LAYOUT_MODEL` at the ONNX file (or pass its path as `layout_model`); without the
+  file or ONNX Runtime the parser runs as usual and says why in
+  `metadata.extra["layout_model"]`.
 
 ## Supported formats
 
 | Format | Reader | Notes |
 |---|---|---|
 | DOCX | python-docx | Word styles, outline levels, bold subheadings, Word list numbering, tables |
-| PDF | PyMuPDF (`pdf` extra) | Text-based PDFs; headings, lists, ruled tables, footnotes, contents pages |
+| PDF | PyMuPDF (`pdf` extra) | Text-based PDFs; structure tags when present; headings, lists, ruled and unruled tables, footnotes, contents pages |
 
 ## Limitations
 
 - No OCR: scanned or image-only pages produce no text and get `needs_ocr = True`.
-- PDF layout: single-column pages are the main target; simple two- and three-column pages
-  are reordered, complex layouts are not.
+- PDF layout: single-column pages are the main target; two- and three-column pages, also
+  with different column layouts above and below, are reordered; complex layouts may need
+  the optional layout model, which was trained on Chinese and English documents.
 - DOCX page numbers are approximate (taken from page breaks).
 - English text is labelled `unknown`.
 - Formulas and charts are reduced to `formula` / `figure` blocks.

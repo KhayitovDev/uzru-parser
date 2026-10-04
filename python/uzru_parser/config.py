@@ -217,6 +217,88 @@ COLUMN_FULL_LINE_SHARE = 0.5
 SPANNING_SHARE = 0.6
 #: A filled box beside the main text with at least this many lines is read after the page.
 SIDE_BOX_MIN_LINES = 2
+#: When no gutter runs through a whole region, it is cut into horizontal bands at blank gaps
+#: of at least this many font sizes (and at full-width lines) and each band is cut on its own.
+XY_BAND_GAP = 1.5
+
+# --- Style profile (PDF) ----------------------------------------------------------------------
+
+#: A style at least this share of the body size counts as body size (bold, italic or capitals
+#: then make it prominent); smaller styles are never heading styles.
+PROFILE_SAME_SIZE = 0.95
+#: A heading style holds at most this share of the document's characters...
+PROFILE_HEADING_MAX_SHARE = 0.1
+#: ...is used for short blocks (MAX_HEADING_LINES lines) at least this share of the time...
+PROFILE_HEADING_SHORT_SHARE = 0.8
+#: ...and is followed by body text at least this share of the time (chart labels and other
+#: short styled fragments follow each other instead).
+PROFILE_HEADING_BEFORE_BODY = 0.5
+#: A style only emphasised (bold, italic, capitals at body size) needs this many blocks to be
+#: a heading style; a bigger style can be one with a single use (a short document's title).
+PROFILE_MIN_EMPHASIS_BLOCKS = 2
+#: A style smaller than the body with this share of its blocks in the footnote zone is the
+#: footnote style.
+PROFILE_FOOTNOTE_BOTTOM = 0.6
+
+# --- Tagged PDFs ------------------------------------------------------------------------------
+
+#: The structure tree is trusted only when its elements hold at least this share of the text:
+#: page headers, footers and page numbers are artifacts outside the tree and rarely reach a
+#: tenth of a page, so much less tagged text means the tags miss content.
+TAGGED_MIN_COVERAGE = 0.8
+#: An element with more lines than this is not a paragraph; when such elements hold more than
+#: TAGGED_MAX_LONG_SHARE of the tagged text, the tags wrap whole pages and are not used.
+TAGGED_LONG_UNIT_LINES = 40
+TAGGED_MAX_LONG_SHARE = 0.5
+#: Elements read in structure order may go back up the same column (a side box, a note);
+#: when more than this share of neighbouring elements does, the tag order is not reading order.
+TAGGED_MAX_BACKWARD_SHARE = 0.2
+#: Speed guard (PyMuPDF issue 5125): MuPDF looks up every marked-content id of a page in the
+#: parent tree, and searches the whole list when an id is not at its own position. Pages with
+#: more ids than TAGGED_CHECK_PAGE_MCIDS have TAGGED_MCID_SAMPLE ids checked; pages with more
+#: than TAGGED_MAX_PAGE_MCIDS, or failing the check, make the parser drop the tree.
+TAGGED_CHECK_PAGE_MCIDS = 200
+TAGGED_MCID_SAMPLE = 20
+TAGGED_MAX_PAGE_MCIDS = 3000
+#: Deepest parent-tree level followed (a sane tree has two or three).
+TAGGED_MAX_TREE_DEPTH = 16
+
+# --- Page confidence (PDF) --------------------------------------------------------------------
+
+#: A check costing at least this much confidence is listed among the page's issues.
+CONFIDENCE_ISSUE = 0.3
+#: Share of a page's lines standing beside another line across a gutter within one reading
+#: region (columns read as one) that costs all confidence.
+CONFIDENCE_SIDE_SHARE = 0.3
+#: Tables scoring at least this (see ``tables.table_score``) cost nothing.
+CONFIDENCE_TABLE_SCORE = 0.6
+#: Prominent short blocks outside the heading styles that cost all confidence.
+CONFIDENCE_HEADING_CONFLICTS = 3
+#: Lines of at most this many characters are very short; above CONFIDENCE_SHORT_SHARE of the
+#: page they cost confidence (chart labels, formula pieces).
+CONFIDENCE_SHORT_LINE_CHARS = 5
+CONFIDENCE_SHORT_SHARE = 0.4
+#: With at least CONFIDENCE_MIN_WORDS words of 4+ letters, a share of words unknown to the
+#: Uzbek and Russian lexicons above CONFIDENCE_UNKNOWN_SHARE costs confidence (good text
+#: stays well below it; a broken encoding knows none).
+CONFIDENCE_MIN_WORDS = 20
+CONFIDENCE_UNKNOWN_SHARE = 0.5
+#: Words looked up per page (an even sample of longer pages).
+CONFIDENCE_SAMPLE_WORDS = 60
+#: Pages below this confidence are where the optional layout model may correct the rules.
+LOW_PAGE_CONFIDENCE = 0.6
+
+# --- Optional layout model (PDF) ---------------------------------------------------------------
+
+#: Model regions below this score are ignored.
+LAYOUT_MIN_SCORE = 0.5
+#: Header and footer regions count only in this top and bottom share of the page.
+LAYOUT_FURNITURE_BAND = 0.15
+#: A line just outside the model's text regions joins the nearest one within this many of
+#: its own heights.
+LAYOUT_NEAREST_LINES = 3.0
+#: A block in a formula region with at most this many words of 4+ letters is a formula.
+LAYOUT_FORMULA_WORDS = 3
 
 # --- Scanned pages ----------------------------------------------------------------------------
 
@@ -232,6 +314,14 @@ SCAN_MAX_TEXT_CHARS = 200
 MARGIN_BAND = 0.1
 #: Share of pages a margin text must repeat on to be page furniture.
 MIN_REPEAT_SHARE = 0.5
+#: Books print other running headers on even and odd pages: a margin text on this share of
+#: the even (or the odd) pages is furniture too.
+PARITY_REPEAT_SHARE = 0.4
+#: A running chapter header changes with the chapter: a margin text on at least this many
+#: consecutive pages, at the same height (within FURNITURE_Y_TOLERANCE of the page height)
+#: and in the same size (within SAME_SIZE_TOLERANCE), is furniture.
+FURNITURE_RUN_PAGES = 3
+FURNITURE_Y_TOLERANCE = 0.01
 #: Footnotes start below this share of the page height, in a font this much smaller.
 FOOTNOTE_ZONE = 0.75
 FOOTNOTE_SIZE_RATIO = 0.92
@@ -266,6 +356,17 @@ HEADER_ROWS = 3
 MIN_RULING_PATHS = 4
 #: Tolerance, as a share of the table's height, when matching its ruling lines to its edges.
 TABLE_RULE_SLACK = 0.01
+#: Tables without ruling lines are looked for where at least this many consecutive rows split
+#: into cells at the same places, cells at least TABLE_CELL_GAP font sizes apart.
+TEXT_TABLE_MIN_ROWS = 3
+TABLE_CELL_GAP = 2.0
+#: Table scores (see ``pdf.table_score``, at most 1): a ruled table scoring below
+#: TABLE_WEAK_SCORE gets a second reading by text alignment, which replaces it only when it
+#: scores TABLE_SCORE_MARGIN higher; a table found by alignment alone needs
+#: TEXT_TABLE_MIN_SCORE.
+TABLE_WEAK_SCORE = 0.3
+TABLE_SCORE_MARGIN = 0.1
+TEXT_TABLE_MIN_SCORE = 0.5
 
 # --- Language and chunks --------------------------------------------------------------------
 

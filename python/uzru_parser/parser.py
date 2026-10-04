@@ -28,11 +28,15 @@ class Parser:
     """Parse a file into a normalized :class:`Document`.
 
     Supports DOCX, and PDF with the optional ``pdf`` extra (PyMuPDF). ``detect_tables``
-    toggles PDF table detection.
+    toggles PDF table detection. ``layout_model`` (off by default; needs the ``layout``
+    extra) lets a small layout model correct the PDF pages the rules are unsure about:
+    ``True`` uses the file named by ``UZRU_LAYOUT_MODEL`` (or one shipped with the package),
+    a path names the ONNX file.
     """
 
-    def __init__(self, detect_tables: bool = True) -> None:
+    def __init__(self, detect_tables: bool = True, layout_model: bool | str | Path = False) -> None:
         self.detect_tables = detect_tables
+        self.layout_model = layout_model
 
     def parse(self, path: str | Path) -> Document:
         path = Path(path)
@@ -44,7 +48,9 @@ class Parser:
         if path.stat().st_size == 0:
             raise DocumentError(f"{path.name} is empty")
         if suffix == ".pdf":
-            return _pdf_reader()(path, detect_tables=self.detect_tables)
+            return _pdf_reader()(
+                path, detect_tables=self.detect_tables, layout_model=self.layout_model
+            )
         try:
             return parse_docx(path)
         except (PackageNotFoundError, BadZipFile, KeyError) as error:

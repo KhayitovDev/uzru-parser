@@ -46,6 +46,8 @@ class Line:
     original: str = ""
     refs: list[str] = field(default_factory=list)
     block: int = 0  # PyMuPDF block number on the page
+    font: str = ""  # font family of most of the line ("timesnewroman")
+    italic: float = 0.0  # share of characters set in an italic face
 
 
 @dataclass
@@ -146,6 +148,8 @@ def _join_row(a: Line, b: Line) -> Line:
         original=f"{a.original} {b.original}",
         refs=a.refs + b.refs,
         block=a.block,
+        font=style_from.font,
+        italic=style_from.italic,
     )
 
 
@@ -291,6 +295,7 @@ def join_spread_lines(lines: list[Line], right_edge: float) -> list[Line]:
                 line = _join_row(line, piece)
             # A bold lead word does not make the whole rebuilt line bold.
             line.bold = sum(p.bold * p.chars for p in pieces) / max(1, line.chars)
+            line.italic = sum(p.italic * p.chars for p in pieces) / max(1, line.chars)
             joined.append(line)
         else:
             joined.extend(row)
@@ -496,6 +501,15 @@ def _starts_next_paragraph(
     )
 
 
+def main_font(lines: Sequence[Line]) -> str | None:
+    """The font family holding most characters of ``lines``."""
+    fonts: Counter[str] = Counter()
+    for line in lines:
+        if line.font:
+            fonts[line.font] += line.chars
+    return fonts.most_common(1)[0][0] if fonts else None
+
+
 def _block_from(lines: list[Line], page: int, spaced: bool, role: str | None = None) -> RawBlock:
     chars = sum(line.chars for line in lines) or 1
     separator = FIGURE_SEPARATOR if role == "figure" else "\n"
@@ -514,6 +528,8 @@ def _block_from(lines: list[Line], page: int, spaced: bool, role: str | None = N
         footnote_refs=[ref for line in lines for ref in line.refs],
         role=role,
         spaced=spaced,
+        font=main_font(lines),
+        italic=sum(line.italic * line.chars for line in lines) / chars,
     )
 
 

@@ -14,6 +14,12 @@ _DIGITS = re.compile(r"\d+")
 _PAGE_NUMBER = re.compile(
     r"^(?:(?:стр\.?|страница|с\.|page|bet)\s*)?[-–—\s]*#(?:\s*(?:из|of|/|dan)\s*#)?[-–—\s]*$"
 )
+#: Decorated page numbers ("[12]", "(12)", "- 12 -", "12-bet") and Roman ones up to 89, the
+#: front matter's ("xiv", "- iv -").
+_DECORATED_PAGE_NUMBER = re.compile(
+    r"^[-–—\s]*[\[(]?\s*(?:#|(?=[ivxl])(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3}))\s*[\])]?"
+    r"(?:\s*-?\s*(?:bet|бет))?[-–—\s]*$"
+)
 _FOOTNOTE_START = re.compile(r"^\s*(\d{1,3})(?:\s+\S|(?=[^\W\d_]))")
 _TOC_TITLE = re.compile(
     rf"^\s*(?:{'|'.join(re.escape(t) for t in config.TOC_TITLES)})\s*[:.]?\s*$", re.IGNORECASE
@@ -52,14 +58,71 @@ def strip_page_furniture(
     for index, key in margin:
         pages_by_key[key].add(blocks[index].page)
 
-    needed = max(2, math.ceil(len(page_heights) * config.MIN_REPEAT_SHARE))
+    page_count = len(page_heights)
+    needed = max(2, math.ceil(page_count * config.MIN_REPEAT_SHARE))
     drop = {
         index
         for index, key in margin
-        if _PAGE_NUMBER.match(key) or len(pages_by_key[key]) >= needed
+        if _is_page_number(key)
+        or len(pages_by_key[key]) >= needed
+        or _alternating(pages_by_key[key], page_count)
     }
+    drop |= _running_titles(blocks, margin, page_heights)
     kept = [raw for index, raw in enumerate(blocks) if index not in drop]
     return kept, len(drop)
+
+
+def _is_page_number(key: str) -> bool:
+    return bool(_PAGE_NUMBER.match(key) or _DECORATED_PAGE_NUMBER.match(key))
+
+
+def _alternating(pages: set[int], page_count: int) -> bool:
+    """On most even pages, or on most odd pages: a book's left- or right-hand header."""
+    for parity in (0, 1):
+        total = (page_count + parity) // 2  # pages of that parity
+        on = sum(1 for page in pages if page % 2 == parity)
+        if on >= max(2, math.ceil(total * config.PARITY_REPEAT_SHARE)):
+            return True
+    return False
+
+
+def _running_titles(
+    blocks: list[RawBlock], margin: list[tuple[int, str]], page_heights: dict[int, float]
+) -> set[int]:
+    """Margin texts repeated on consecutive pages at the same height and size (a running
+    chapter title that changes with the chapter)."""
+    by_key: dict[str, list[int]] = defaultdict(list)
+    for index, key in margin:
+        by_key[key].append(index)
+    drop: set[int] = set()
+    for indexes in by_key.values():
+        if len(indexes) < config.FURNITURE_RUN_PAGES:
+            continue
+        run: list[int] = []
+        for index in sorted(indexes, key=lambda i: blocks[i].page):
+            if run and (
+                blocks[index].page != blocks[run[-1]].page + 1
+                or not _same_place(blocks[run[-1]], blocks[index], page_heights)
+            ):
+                if len(run) >= config.FURNITURE_RUN_PAGES:
+                    drop.update(run)
+                run = []
+            if not run or blocks[index].page != blocks[run[-1]].page:
+                run.append(index)
+        if len(run) >= config.FURNITURE_RUN_PAGES:
+            drop.update(run)
+    return drop
+
+
+def _same_place(a: RawBlock, b: RawBlock, page_heights: dict[int, float]) -> bool:
+    """Same height on the page and the same font size."""
+    if a.bbox is None or b.bbox is None:
+        return False
+    height = page_heights.get(b.page, 0.0) or page_heights.get(a.page, 0.0)
+    near = abs(a.bbox[1] - b.bbox[1]) <= config.FURNITURE_Y_TOLERANCE * height
+    sizes = (a.font_size or 0.0, b.font_size or 0.0)
+    same_size = max(sizes) - min(sizes) <= config.SAME_SIZE_TOLERANCE * max(max(sizes), 1.0)
+    return near and same_size
 
 
 def mark_footnotes(
@@ -75,6 +138,8 @@ def mark_footnotes(
         height = page_heights.get(raw.page, 0.0)
         match = _FOOTNOTE_START.match(raw.text)
         if raw.rows is not None or raw.bbox is None or not match or height <= 0:
+            continue
+        if raw.list_item or raw.heading_level is not None:  # a tagged item or heading
             continue
         if raw.bbox[1] < height * config.FOOTNOTE_ZONE:
             continue

@@ -277,3 +277,45 @@ def test_sentence_above_the_contents_is_not_its_title() -> None:
     ]
     mark_toc(blocks, page_count=200)
     assert blocks[0].role is None
+
+
+# --- Running headers on even / odd pages and per chapter, decorated page numbers -------------
+
+BOOK = {page: 800.0 for page in range(1, 13)}
+
+
+def styled(text: str, page: int, y: float, size: float = 9.0) -> RawBlock:
+    return RawBlock(text=text, page=page, bbox=(50, y, 300, y + 10), font_size=size)
+
+
+def test_header_on_most_even_pages_is_furniture() -> None:
+    blocks = [styled("Bank ishi asoslari", page, 20) for page in (2, 4, 6, 8)]
+    blocks.append(styled("Asosiy matn", 3, 300, 11))
+    kept, removed = strip_page_furniture(blocks, BOOK)
+    assert [b.text for b in kept] == ["Asosiy matn"] and removed == 4
+
+
+def test_chapter_header_on_consecutive_pages_is_furniture() -> None:
+    blocks = [styled("3-MAVZU. Bank operatsiyalari", page, 20) for page in (5, 6, 7)]
+    title = styled("3-MAVZU. Bank operatsiyalari", 4, 70, 16)  # the chapter's own heading
+    kept, removed = strip_page_furniture([title, *blocks], BOOK)
+    assert kept == [title] and removed == 3
+
+
+def test_margin_text_on_two_pages_or_at_another_place_stays() -> None:
+    twice = [styled("Jadval davomi", page, 20) for page in (5, 6)]
+    moving = [styled("Izoh", 7, 20), styled("Izoh", 8, 60), styled("Izoh", 9, 20)]
+    kept, removed = strip_page_furniture([*twice, *moving], BOOK)
+    assert removed == 0 and len(kept) == 5
+
+
+@pytest.mark.parametrize("text", ["- 7 -", "[7]", "(7)", "7-bet", "xiv", "- iv -"])
+def test_decorated_and_roman_page_numbers_are_furniture(text: str) -> None:
+    kept, removed = strip_page_furniture([styled(text, 3, 780)], BOOK)
+    assert removed == 1 and not kept
+
+
+@pytest.mark.parametrize("text", ["mix", "1.2", "Bank", "A)"])
+def test_words_and_section_numbers_in_the_margin_stay(text: str) -> None:
+    kept, removed = strip_page_furniture([styled(text, 3, 780)], BOOK)
+    assert removed == 0

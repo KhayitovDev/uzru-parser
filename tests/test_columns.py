@@ -118,3 +118,63 @@ def test_long_single_column_page_with_many_gaps_stays_one_region() -> None:
         for i in range(150)
     ]
     assert reading_regions(lines, [], 10.0) == [lines]
+
+
+def sentences(name: str, count: int = 6) -> str:
+    return " ".join(
+        f"{name} qismidagi {i}-gap bank tizimi va pul muomalasi haqida soʻzlaydi."
+        for i in range(1, count + 1)
+    )
+
+
+def test_two_columns_above_and_three_below_are_read_band_by_band(tmp_path: Path) -> None:
+    top_left, top_right = sentences("Yuqori chap"), sentences("Yuqori oʻng")
+    low_left, low_mid, low_right = (
+        sentences("Quyi chap"),
+        sentences("Quyi oʻrta"),
+        sentences("Quyi oʻng"),
+    )
+    pdf = page_pdf(
+        tmp_path / "bands.pdf",
+        [
+            ((50, 72, 290, 360), top_left, 9),
+            ((310, 72, 550, 360), top_right, 9),
+            ((40, 420, 205, 770), low_left, 9),
+            ((220, 420, 385, 770), low_mid, 9),
+            ((400, 420, 565, 770), low_right, 9),
+        ],
+    )
+    # Narrow ragged columns may break into more paragraphs; the reading order is what counts.
+    expected = [top_left, top_right, low_left, low_mid, low_right]
+    assert " ".join(paragraphs(pdf)) == " ".join(expected)
+
+
+def test_single_column_with_wide_gaps_keeps_its_order() -> None:
+    lines = [
+        line(f"paragraf {i // 4} qatori {i}", 72, 520, 60 + 14 * i + 30 * (i // 4))
+        for i in range(24)
+    ]
+    assert reading_regions(lines, [], 10.0) == [lines]
+
+
+def test_bands_with_different_gutters_are_cut_one_by_one() -> None:
+    """Lines come sorted by height, as from producers that write one block per line: the
+    columns of each band are interleaved until the band is cut."""
+    top = [(50, 290, "tl"), (310, 550, "tr")]
+    bottom = [(40, 205, "bl"), (220, 385, "bm"), (400, 565, "br")]
+    lines: list[Line] = []
+    for row in range(8):
+        lines += [line(f"{name} qator {row} matni", x0, x1, 80 + 14 * row) for x0, x1, name in top]
+    for row in range(8):
+        lines += [
+            line(f"{name} qator {row} matni", x0, x1, 300 + 14 * row) for x0, x1, name in bottom
+        ]
+    regions = reading_regions(lines, [], 10.0)
+    assert [{text.text.split()[0] for text in region} for region in regions] == [
+        {"tl"},
+        {"tr"},
+        {"bl"},
+        {"bm"},
+        {"br"},
+    ]
+    assert all(len(region) == 8 for region in regions)

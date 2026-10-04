@@ -1,10 +1,13 @@
-"""Reading order of multi-column pages.
+"""Reading order of multi-column pages (an XY-cut).
 
 A page is cut into regions read one after another: columns are found at vertical gutters
 between the lines, and full-width lines crossing a gutter (a title above the columns) separate
-sections that are read top to bottom. Boxes with their own background next to the main text
-(side boxes) are read after it. A page without columns or side boxes stays one region in its
-original order.
+sections that are read top to bottom. When no gutter runs through the whole region (two
+columns above, three below, or gutters at different places), the region is first cut into
+horizontal bands at clear blank gaps and at full-width lines, and each band is cut on its own
+(the pre-masking and banding of XY-Cut++). Boxes with their own background next to the main
+text (side boxes) are read after it. A page without columns or side boxes stays one region in
+its original order.
 """
 
 from __future__ import annotations
@@ -68,7 +71,42 @@ def _cut(lines: list[Line], size: float) -> list[list[Line]]:
         regions = _split_at(lines, gutter, size)
         if regions is not None:
             return regions
-    return [lines]
+    return _cut_bands(lines, size, width) or [lines]
+
+
+def _bands(lines: list[Line], size: float, width: float) -> list[list[Line]]:
+    """Horizontal bands of ``lines`` from top to bottom: a band ends at a blank gap of at
+    least ``XY_BAND_GAP`` font sizes, and a full-width line is a band of its own."""
+    bands: list[list[Line]] = []
+    bottom = float("-inf")
+    for line in sorted(lines, key=lambda line: line.bbox[1]):
+        spanning = line.bbox[2] - line.bbox[0] >= config.SPANNING_SHARE * width
+        gap = line.bbox[1] - bottom > config.XY_BAND_GAP * size
+        if not bands or gap or spanning or _spans(bands[-1], width):
+            bands.append([line])
+        else:
+            bands[-1].append(line)
+        bottom = max(bottom, line.bbox[3]) if not gap and not spanning else line.bbox[3]
+    return bands
+
+
+def _spans(band: list[Line], width: float) -> bool:
+    return len(band) == 1 and band[0].bbox[2] - band[0].bbox[0] >= config.SPANNING_SHARE * width
+
+
+def _cut_bands(lines: list[Line], size: float, width: float) -> list[list[Line]] | None:
+    """Regions of ``lines`` cut band by band, or ``None`` when no band holds columns (the
+    region then keeps its order)."""
+    bands = _bands(lines, size, width)
+    if len(bands) < 2:
+        return None
+    regions: list[list[Line]] = []
+    found = False
+    for band in bands:
+        parts = _cut(_restore(band, lines), size)
+        found = found or len(parts) > 1
+        regions.extend(parts)
+    return regions if found else None
 
 
 def _gutters(lines: list[Line], size: float) -> list[tuple[float, float]]:

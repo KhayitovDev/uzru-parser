@@ -40,6 +40,7 @@ Changelog = "https://github.com/KhayitovDev/uzru-parser/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 pdf = ["pymupdf>=1.24"]
+layout = ["pymupdf>=1.24", "onnxruntime>=1.17"]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "maturin>=1.9.6,<2.0", "pymupdf>=1.24"]
 
 [tool.maturin]
@@ -60,3 +61,9 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.mypy]
 strict = true
 files = ["python"]
+
+[[tool.mypy.overrides]]
+# The optional layout model's runtime (ONNX Runtime, which brings NumPy): absent without the
+# "layout" extra.
+module = ["onnxruntime", "onnxruntime.*", "numpy", "numpy.*"]
+ignore_missing_imports = true
