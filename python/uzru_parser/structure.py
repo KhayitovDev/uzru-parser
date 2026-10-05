@@ -160,12 +160,17 @@ def build_blocks(
 
     blocks: list[Block] = []
     extended: list[Block] = []
+    grids: dict[int, _Grid] = {}  # table block id -> its columns before empty ones were dropped
     previous: RawBlock | None = None
     for (raw, text), heading in zip(prepared, headings, strict=True):
         if not text:
             continue
         if raw.rows is not None:
-            blocks.append(_table_block(raw, raw.rows, repair, stats))
+            table = _table_block(raw, raw.rows, repair, stats)
+            grids[id(table)] = _Grid(
+                max((len(row) for row in raw.rows), default=0), table.extra.pop("_columns")
+            )
+            blocks.append(table)
         elif raw.footnote:
             blocks.append(_footnote_block(raw, text))
         elif heading is not None:
@@ -201,7 +206,7 @@ def build_blocks(
     blocks = _join_split_paragraphs(blocks, repair, page_layout)
     blocks = _stamps_after_labels(blocks)
     if page_layout:
-        blocks = _join_split_tables(blocks)
+        blocks = _join_split_tables(blocks, grids)
         _mark_contents_titles(blocks)
     _mark_leading_title(blocks, outline_levels=not page_layout)
     _inherit_short_languages(blocks)
@@ -430,7 +435,16 @@ def document_title(blocks: list[Block]) -> str | None:
     return " ".join(parts) or None
 
 
-def _join_split_tables(blocks: list[Block]) -> list[Block]:
+@dataclass(frozen=True)
+class _Grid:
+    """A table's columns as found on its page: their number, and which of them hold text
+    (a column empty on one page is dropped there, so two parts may keep different ones)."""
+
+    width: int
+    kept: list[int]
+
+
+def _join_split_tables(blocks: list[Block], grids: dict[int, _Grid] | None = None) -> list[Block]:
     """A table cut by a page break is one table. The part on the next page continues the
     table that ends the previous page when it opens the page with the same columns at the
     same place; a repeated header is dropped, and a short fragment left between the parts
@@ -441,11 +455,13 @@ def _join_split_tables(blocks: list[Block]) -> list[Block]:
             fragment = _cell_fragment(out, block)
             before = [b for b in out if b is not fragment and not _out_of_flow(b)]
             table = before[-1] if before else None
-            if table is not None and _continues_table(table, block):
+            grid = (grids or {}).get(id(table)) if table is not None else None
+            part = (grids or {}).get(id(block))
+            if table is not None and _continues_table(table, block, grid, part):
                 if fragment is not None:
                     _append_to_last_row(table, fragment.text)
                     out = [b for b in out if b is not fragment]
-                _append_rows(table, block)
+                _append_rows(table, block, grid, part)
                 continue
         out.append(block)
     return out
@@ -473,12 +489,22 @@ def _table_columns(block: Block) -> int:
     return max((len(row) for row in rows), default=0)
 
 
-def _continues_table(previous: Block, block: Block) -> bool:
+def _continues_table(
+    previous: Block, block: Block, grid: _Grid | None = None, part: _Grid | None = None
+) -> bool:
+    """Same columns at the same place on the next page. With the grids known, the columns
+    are compared as found, before columns empty on one page were dropped: a column the
+    continuation leaves empty still lines up."""
     if previous.type is not BlockType.TABLE:
         return False
     if block.page != previous.extra.get("page_end", previous.page) + 1:
         return False
-    if _table_columns(previous) != _table_columns(block) or not _table_columns(block):
+    if not _table_columns(block):
+        return False
+    if grid is not None and part is not None:
+        if grid.width != part.width or not set(part.kept) <= set(grid.kept):
+            return False
+    elif _table_columns(previous) != _table_columns(block):
         return False
     if previous.bbox and block.bbox:
         width = max(previous.bbox[2] - previous.bbox[0], 1.0)
@@ -501,18 +527,26 @@ def _same_row(a: list[str], b: list[str]) -> bool:
     return [" ".join(cell.split()) for cell in a] == [" ".join(cell.split()) for cell in b]
 
 
-def _append_rows(table: Block, block: Block) -> None:
+def _append_rows(
+    table: Block, block: Block, grid: _Grid | None = None, part: _Grid | None = None
+) -> None:
     rows: list[list[str]] = table.extra["rows"]
     new: list[list[str]] = block.extra["rows"]
+    columns = list(range(_table_columns(block)))
+    if grid is not None and part is not None and part.kept != grid.kept:
+        # Put each cell of the continuation under its column in the table it continues.
+        columns = [grid.kept.index(column) for column in part.kept]
+        width = len(grid.kept)
+        new = [_placed(row, columns, width) for row in new]
     repeated = 0
     while repeated < min(len(rows), len(new) - 1) and _same_row(new[repeated], rows[repeated]):
         repeated += 1
     offset = len(rows) - repeated
     rows.extend(new[repeated:])
     spans = [
-        {**span, "row": span["row"] + offset}
+        {**span, "row": span["row"] + offset, "col": columns[span["col"]]}
         for span in block.extra.get("spans", [])
-        if span["row"] >= repeated
+        if span["row"] >= repeated and span["col"] < len(columns)
     ]
     if spans:
         table.extra.setdefault("spans", []).extend(spans)
@@ -520,6 +554,13 @@ def _append_rows(table: Block, block: Block) -> None:
     table.raw_text = "\n".join(part for part in (table.raw_text, block.raw_text) if part)
     table.extra["page_end"] = block.extra.get("page_end", block.page)
     table.language = detect_language(table.text)
+
+
+def _placed(row: list[str], columns: list[int], width: int) -> list[str]:
+    cells = [""] * width
+    for cell, column in zip(row, columns, strict=False):
+        cells[column] = cell
+    return cells
 
 
 def _rows_text(rows: list[list[str]]) -> str:
@@ -532,6 +573,7 @@ def _table_block(
     rows, row_ids, column_ids = _clean_table(rows, repair, stats)
     block = _block(BlockType.TABLE, _rows_text(rows), raw)
     block.extra["rows"] = rows
+    block.extra["_columns"] = column_ids
     if raw.spans:
         block.extra["spans"] = _kept_spans(raw.spans, row_ids, column_ids)
     return block

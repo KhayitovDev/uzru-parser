@@ -444,6 +444,9 @@ HEADER_ROWS = 3
 #: highlighted line) and would frame fake cells.
 MIN_RULING_PATHS = 2
 RULE_THICKNESS = 2.0
+#: On a page with filled boxes behind the text, a table read while ignoring those boxes
+#: replaces the table it covers when it overlaps at least this share of the smaller one.
+TABLE_SAME_REGION = 0.8
 #: Tolerance, as a share of the table's height, when matching its ruling lines to its edges.
 TABLE_RULE_SLACK = 0.01
 #: Tables without ruling lines are looked for where at least this many consecutive rows split
