@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 (2026-10-05)
+
+- PDF tables printed by browsers: a cell whose text wraps over several lines is one row again.
+  Browsers fill a box behind every line of text, and the table reader took the boxes' edges
+  for table rules, so each wrapped line became a row and the row's number and points were
+  repeated on every line. On pages with such boxes tables are read again ignoring them.
+- A table continued on the next page is joined even when that part leaves a column empty, so
+  every chunk holding part of the table starts with its header row.
+
 ## 0.2.0 (2026-10-04)
 
 Measured with `tools/evaluate.py` on ten real Uzbek and Russian documents (legal acts,

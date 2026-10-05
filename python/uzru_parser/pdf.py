@@ -611,7 +611,7 @@ def _read_page(
     page: pymupdf.Page, number: int, detect_tables: bool, stats: CleanStats
 ) -> _PageContent:
     drawings = page.get_cdrawings()  # type: ignore[no-untyped-call]
-    tables = _find_tables(page, number, _rulings(drawings)) if detect_tables else []
+    tables = _find_tables(page, number, drawings) if detect_tables else []
     page_dict = page.get_text("dict", sort=True)  # type: ignore[no-untyped-call]
     lines: list[Line] = []
     images: list[BBox] = []
@@ -846,11 +846,46 @@ def _rulings(drawings: list[dict[str, Any]]) -> int:
     return min(across, down)
 
 
-def _find_tables(page: pymupdf.Page, number: int, rulings: int) -> list[RawBlock]:
-    """Ruled tables (PyMuPDF's "lines" strategy), on pages with enough table rules."""
-    if rulings < config.MIN_RULING_PATHS:
+def _find_tables(page: pymupdf.Page, number: int, drawings: list[dict[str, Any]]) -> list[RawBlock]:
+    """Ruled tables (PyMuPDF's "lines" strategy), on pages with enough table rules.
+
+    The "lines" strategy also takes the edges of filled boxes for rules. Browsers fill a box
+    behind each line of text, so inside a cell every wrapped line would become a row (and the
+    boxes' sides extra columns). On a page with such boxes a table is read again ignoring
+    them ("lines_strict"), and that reading replaces the table it covers."""
+    if _rulings(drawings) < config.MIN_RULING_PATHS:
         return []
-    return _tables_from(page.find_tables().tables, number)  # type: ignore[no-untyped-call]
+    found = page.find_tables().tables  # type: ignore[no-untyped-call]
+    if found and _background_boxes(drawings):
+        strict = page.find_tables(strategy="lines_strict").tables  # type: ignore[no-untyped-call]
+        found = [
+            next(
+                (other for other in strict if _same_region(tuple(table.bbox), tuple(other.bbox))),
+                table,
+            )
+            for table in found
+        ]
+    return _tables_from(found, number)
+
+
+def _background_boxes(drawings: list[dict[str, Any]]) -> bool:
+    """The page fills boxes without an outline that are thicker than a rule (behind text)."""
+    for drawing in drawings:
+        x0, y0, x1, y1 = drawing["rect"]
+        if drawing.get("type") == "f" and min(x1 - x0, y1 - y0) > config.RULE_THICKNESS:
+            return True
+    return False
+
+
+def _same_region(a: BBox, b: BBox) -> bool:
+    """Two table boxes cover the same area (their overlap is most of each)."""
+    width = min(a[2], b[2]) - max(a[0], b[0])
+    height = min(a[3], b[3]) - max(a[1], b[1])
+    if width <= 0 or height <= 0:
+        return False
+    common = width * height
+    smaller = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    return smaller > 0 and common >= config.TABLE_SAME_REGION * smaller
 
 
 def _tables_from(found: list[Any], number: int) -> list[RawBlock]:

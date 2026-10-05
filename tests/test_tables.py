@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pymupdf
+import pytest
 from helpers import bold_font, cyrillic_font
 from uzru_parser import BlockType, parse
 from uzru_parser.pdf import _rulings
@@ -162,3 +163,152 @@ def test_a_page_number_inside_a_table_frame_is_not_a_row() -> None:
     assert _page_number_row(["", "14", ""]) and _page_number_row(["- 7 -", ""])
     assert not _page_number_row(["14", "Ammoniy azoti", "mg/kg"])
     assert not _page_number_row(["Jami", "125", ""])
+
+
+# A scoring table as browsers print it: rows enclosed by thin rules, a long indicator wrapping
+# inside its cell with a filled box drawn behind each of its lines, the number and points
+# centred in the row, a last column left blank, and the table going on onto the next page.
+INDICATORS = [
+    (
+        "1.",
+        "Xususiy bandlik agentligi taʼsischilari tarkibida sudlanganligi tugallanmagan "
+        "shaxslar mavjudligi va ular bilan shartnomalar tuzilganligi",
+        "5",
+    ),
+    (
+        "2.",
+        "Ish qidirayotgan shaxsdan xizmatlar uchun olinadigan haqni bankdagi maxsus "
+        "depozitga qoʻyilishi toʻgʻrisidagi qoidaga amal qilmasdan pul mablagʻlari olinganligi",
+        "10",
+    ),
+    (
+        "3.",
+        "Xususiy bandlik agentligi, shuningdek uning filiallari va (yoki) vakolatxonalari "
+        "haqidagi maʼlumotlar oʻzgarganligi toʻgʻrisida Migratsiya agentligini yetti ish kuni "
+        "ichida xabardor qilinmaganligi",
+        "15",
+    ),
+    (
+        "4.",
+        "Migratsiya agentligining soʻroviga koʻra oʻz faoliyati haqidagi maʼlumotlarni "
+        "taqdim etmaganligi",
+        "10",
+    ),
+]
+HEADER = ("T/r", "Xavf darajasini baholash koʻrsatkichlari", "Ball", "Qoʻyilgan ball")
+EDGES = (63.0, 92.0, 454.0, 510.0, 581.0)
+
+
+def scoring_table(path: Path) -> Path:
+    font = pymupdf.Font(fontfile=cyrillic_font())
+    pdf = pymupdf.open()
+
+    def wrap(text: str) -> list[str]:
+        lines, line = [], ""
+        for word in text.split():
+            joined = f"{line} {word}".strip()
+            if font.text_length(joined, 11) > EDGES[2] - EDGES[1] - 10 and line:
+                lines.append(line)
+                line = word
+            else:
+                line = joined
+        return [*lines, line]
+
+    def rule(page: pymupdf.Page, y: float) -> None:
+        page.draw_rect(pymupdf.Rect(EDGES[0], y, EDGES[-1], y + 0.7), color=None, fill=(0, 0, 0))
+
+    def frame(page: pymupdf.Page, top: float, bottom: float) -> None:
+        for x in EDGES:
+            page.draw_rect(pymupdf.Rect(x, top, x + 0.7, bottom), color=None, fill=(0, 0, 0))
+
+    rows = (
+        [(HEADER[0], HEADER[1], HEADER[2]), *INDICATORS[:2]],
+        [*INDICATORS[2:], ("", "Jami ballar yigʻindisi", "40")],
+    )
+    for number, part in enumerate(rows):
+        page = pdf.new_page()
+        page.insert_font(fontname="R", fontfile=cyrillic_font())
+        if number == 0:
+            text_paragraph(page, 60)
+        y = top = 140.0 if number == 0 else 57.0
+        rule(page, y)
+        for first, indicator, ball in part:
+            lines = wrap(indicator)
+            height = 16 * len(lines)
+            middle = y + height / 2 + 4
+            for k, line in enumerate(lines):
+                # The boxes fill the cell from rule to rule, one per line.
+                box = pymupdf.Rect(EDGES[1] + 5, y + 16 * k, EDGES[2] - 4, y + 16 * (k + 1))
+                page.draw_rect(box, color=None, fill=(1, 1, 1))
+                page.insert_text((EDGES[1] + 5, y + 12 + 16 * k), line, fontname="R", fontsize=11)
+            page.insert_text((EDGES[0] + 4, middle), first, fontname="R", fontsize=11)
+            page.insert_text((EDGES[2] + 4, middle), ball, fontname="R", fontsize=11)
+            if first == HEADER[0]:
+                page.insert_text((EDGES[3] + 4, middle), HEADER[3], fontname="R", fontsize=8)
+            y += height
+            rule(page, y)
+        frame(page, top, y)
+    pdf.save(path)
+    return path
+
+
+def test_wrapped_cell_lines_on_filled_boxes_are_one_row(tmp_path: Path) -> None:
+    found = tables(scoring_table(tmp_path / "scoring.pdf"))
+    assert len(found) == 1  # one table over both pages
+    rows = found[0]
+    assert rows[0] == list(HEADER)
+    numbers = [row[0] for row in rows[1:-1]]
+    assert numbers == ["1.", "2.", "3.", "4."]  # each number once, one row per indicator
+    assert rows[2][1] == " ".join(INDICATORS[1][1].split())
+    assert sum(int(row[2]) for row in rows[1:-1]) == int(rows[-1][2])
+
+
+def test_every_chunk_of_a_continued_table_starts_with_its_header(tmp_path: Path) -> None:
+    from uzru_parser import Chunker
+
+    document = parse(scoring_table(tmp_path / "scoring.pdf"))
+    header = " | ".join(HEADER)
+    for chunk in Chunker(max_tokens=60, overlap=10).chunk(document):
+        table_lines = [line for line in chunk.text.split("\n") if " | " in line]
+        if table_lines:
+            assert table_lines[0] == header
+
+
+#: The real regulation behind the two tests above (pages 6-7 hold the scoring table). The tests
+#: run when the file is in tests/fixtures/.
+SCORING_PDF = Path(__file__).parent / "fixtures" / "1.pdf"
+needs_scoring_pdf = pytest.mark.skipif(not SCORING_PDF.is_file(), reason="fixture 1.pdf missing")
+ROW_6 = (
+    "6. | Ish qidirayotgan shaxsdan xizmatlar uchun olinadigan haqni bankdagi maxsus depozitga "
+    "qoʻyilishi toʻgʻrisidagi qoidaga amal qilmasdan pul mablagʻlari olinganligi | 10"
+)
+ROW_7 = (
+    "7. | Xususiy bandlik agentligi, shuningdek uning filiallari va (yoki) vakolatxonalari "
+    "haqidagi maʼlumotlar oʻzgarganligi toʻgʻrisida Migratsiya agentligini yetti ish kuni ichida "
+    "xabardor qilinmaganligi | 15"
+)
+
+
+@needs_scoring_pdf
+def test_the_scoring_table_has_one_row_per_indicator() -> None:
+    found = tables(SCORING_PDF)
+    scoring = [rows for rows in found if rows[0][0] == "T/r"]
+    assert len(scoring) == 1
+    rows = scoring[0]
+    indicators, total = rows[1:-1], rows[-1]
+    assert [row[0] for row in indicators] == [f"{n}." for n in range(1, 11)]
+    assert total[0] == "Jami ballar yigʻindisi" and total[2] == "100"
+    lines = {" | ".join(cell for cell in row if cell) for row in indicators}
+    assert ROW_6 in lines and ROW_7 in lines
+    assert sum(int(row[2]) for row in indicators) == 100
+
+
+@needs_scoring_pdf
+def test_every_chunk_of_the_scoring_table_starts_with_its_header() -> None:
+    from uzru_parser import Chunker
+
+    document = parse(SCORING_PDF)
+    for chunk in Chunker(max_tokens=400, overlap=50).chunk(document):
+        table_lines = [line for line in chunk.text.split("\n") if " | " in line]
+        if any(line.split(" | ")[0].rstrip(".").isdigit() for line in table_lines):
+            assert table_lines[0].startswith("T/r | Xavf darajasini baholash koʻrsatkichlari")
